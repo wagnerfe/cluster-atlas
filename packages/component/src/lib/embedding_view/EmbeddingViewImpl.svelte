@@ -362,12 +362,27 @@
       ? Math.min(downsampleMaxPoints, downsampleMaxPointsInteractive as number)
       : downsampleMaxPoints,
   );
-  let effectiveDownsampleDensityWeight = $derived(
+  let effectiveDownsampleDensityWeight = $derived.by(() => {
     // Density weighting buys nothing while the user is dragging — the
     // renderer otherwise pays for accumulate + blur over all 75M points
     // every frame just to bias sampling that's about to be redrawn.
-    isInteracting ? 0 : downsampleDensityWeight,
-  );
+    if (isInteracting) return 0;
+    // At very large N the accumulate pass (one atomic add per point
+    // into a ~480-cell density grid) becomes pathologically slow on
+    // wide-angle views. At world-view zoom on the 322 M eubucco file,
+    // ~250 M points concentrate over Europe — every grid cell sees
+    // ~500 K serialized atomic adds, the single Metal command buffer
+    // runs >5 s, and the macOS GPU watchdog kills it (→ device.lost).
+    // Skipping density weighting falls back to uniform random
+    // sampling: with downsampleMaxPoints=4 M the acceptance rate is
+    // ~1 % either way, so the visual difference is invisible at 322 M.
+    // ``mode == "density"`` still runs accumulate via wantsDensityOverlay
+    // (the user explicitly asked for the density visualisation), so
+    // this gate is points-mode only.
+    const n = (data.xPacked?.length ?? 0) || (data.x?.length ?? 0);
+    if (mode != "density" && n > 50_000_000) return 0;
+    return downsampleDensityWeight;
+  });
   let mapStyle = $derived(
     isGis ? (config?.mapStyle !== undefined ? config.mapStyle : "https://tiles.openfreemap.org/styles/liberty") : null,
   );
@@ -612,13 +627,28 @@
     // swap chain, so we leave ``_renderInFlight`` false.
     if (dev) {
       _renderInFlight = true;
-      dev.queue.onSubmittedWorkDone().then(() => {
+      const myToken = ++_renderToken;
+      let settled = false;
+      const finish = (reason: "drain" | "watchdog" | "rejected") => {
+        if (settled || myToken !== _renderToken) return;
+        settled = true;
+        clearTimeout(watchdog);
         _renderInFlight = false;
+        if (reason === "watchdog") {
+          console.warn(
+            "[atlas] render backpressure watchdog fired — onSubmittedWorkDone() did not settle in 30 s. Likely device.lost or GPU process hang; force-resetting so subsequent renders can proceed.",
+          );
+        }
         if (_renderPending) {
           _renderPending = false;
           setNeedsRender();
         }
-      });
+      };
+      const watchdog = setTimeout(() => finish("watchdog"), 30_000);
+      dev.queue.onSubmittedWorkDone().then(
+        () => finish("drain"),
+        () => finish("rejected"),
+      );
     }
     // Always-on "first GPU frame on screen" signal. The viewer's
     // ``EmbeddingAtlas`` column-chart discovery polls
@@ -699,13 +729,41 @@
   // render against the latest viewport state. Net: at most one render
   // queued at a time; rapid pan-releases collapse into a single
   // post-drain frame.
+  //
+  // Resilience: ``onSubmittedWorkDone()`` does NOT resolve when the
+  // device is lost (Chromium/Dawn behavior). Without protection,
+  // ``_renderInFlight`` stays true forever, every later render goes
+  // pending, and the canvas stops updating. Three guards:
+  //   1. ``_renderToken`` — late callbacks from a dead device are
+  //      ignored (the token doesn't match anymore).
+  //   2. 30 s watchdog — force-reset if the Promise never settles.
+  //   3. ``$effect`` on ``renderer`` — when the device.lost handler
+  //      recreates the renderer, bump the token and clear the flags
+  //      so the new device starts with a clean slate.
   let _renderInFlight = false;
   let _renderPending = false;
+  let _renderToken = 0;
   function setNeedsRender() {
     if (_request == null) {
       _request = requestAnimationFrame(render);
     }
   }
+  $effect(() => {
+    // Reset backpressure whenever the renderer reference changes
+    // (initial mount + post-device.lost recreation). Bumping the
+    // token invalidates any in-flight onSubmittedWorkDone callback
+    // bound to the previous device. Flushing ``_renderPending``
+    // ensures a queued frame from the old renderer turns into a
+    // fresh frame on the new one.
+    if (renderer != null) {
+      _renderToken++;
+      _renderInFlight = false;
+      if (_renderPending) {
+        _renderPending = false;
+        setNeedsRender();
+      }
+    }
+  });
 
   function setupWebGLRenderer(canvas: HTMLCanvasElement) {
     webGPUPrompt = "WebGPU is unavailable. Falling back to WebGL.";
