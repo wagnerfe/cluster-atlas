@@ -60,8 +60,23 @@
     cache = null,
   }: EmbeddingViewMosaicProps = $props();
 
-  let xData: Float32Array<ArrayBuffer> = $state.raw(new Float32Array());
-  let yData: Float32Array<ArrayBuffer> = $state.raw(new Float32Array());
+  // Stable empty sentinel. Reusing one identity across "no data" updates
+  // lets the renderer's gpuBufferData identity check short-circuit
+  // instead of zero-filling the destination on every refresh.
+  const EMPTY_F32: Float32Array<ArrayBuffer> = new Float32Array(new ArrayBuffer(0));
+
+  let xData: Float32Array<ArrayBuffer> = $state.raw(EMPTY_F32);
+  let yData: Float32Array<ArrayBuffer> = $state.raw(EMPTY_F32);
+  // Packed wire input — Uint16Array views into the arrow batch when the
+  // u16 wire path is active. ``EmbeddingViewImpl`` forwards these to the
+  // renderer, which uploads them to a u16 GPU storage buffer and unpacks
+  // to f32 via a one-shot compute pass. Avoids the 2.576 GB JS-side
+  // ``Float32Array(322M)`` allocation that previously held the heap at
+  // 5+ GB on cold load and broke pan-release on stock 4 GB Chrome tabs.
+  let xPackedData: Uint16Array<ArrayBuffer> | null = $state.raw(null);
+  let yPackedData: Uint16Array<ArrayBuffer> | null = $state.raw(null);
+  let coordsBoundsX: [number, number] | null = $state.raw(null);
+  let coordsBoundsY: [number, number] | null = $state.raw(null);
   let categoryData: Uint8Array<ArrayBuffer> | null = $state.raw(null);
   // True when ``yData`` arrived already Mercator-projected from the server
   // (GIS Path C only). Prevents the ``EmbeddingViewImpl`` JS projection
@@ -257,46 +272,74 @@
           }
           const t1 = performance.now();
 
+          // Wire format dictates the renderer's fill path. When the
+          // server hands back u16-packed coordinates, we forward the
+          // Uint16Array directly to the renderer so it can upload to a
+          // u16 GPU storage buffer and run the one-shot unpack compute
+          // pass. The previous ``new Float32Array(N)`` round-trip
+          // allocated 1.288 GB *per axis* on the JS heap (2.576 GB
+          // peak) — at 322 M points that's enough on its own to push
+          // a stock 4 GB Chrome tab into a blank-canvas state after
+          // pan-release. The packed path keeps the JS-side footprint
+          // at the wire size (~644 MB per axis), held only long enough
+          // to writeBuffer it across to GPU.
+          let nextXPacked: Uint16Array<ArrayBuffer> | null = null;
+          let nextYPacked: Uint16Array<ArrayBuffer> | null = null;
+          let nextBoundsX: [number, number] | null = null;
+          let nextBoundsY: [number, number] | null = null;
+          let nextX: Float32Array<ArrayBuffer> = EMPTY_F32;
+          let nextY: Float32Array<ArrayBuffer> = EMPTY_F32;
           if (packed && packedBounds != null && (xArray instanceof Uint16Array || yArray instanceof Uint16Array)) {
-            // Unpack u16 → f32 using the same linear map the server used
-            // to quantize. Doing this once per batch is cheap compared to
-            // the bytes we just saved on the wire.
-            const [xMin, xMax] = packedBounds.x;
-            const [yMin, yMax] = packedBounds.y;
-            const xScale = (xMax - xMin) / 65535;
-            const yScale = (yMax - yMin) / 65535;
-            const n = xArray?.length ?? yArray?.length ?? 0;
-            const xOut = new Float32Array(n);
-            const yOut = new Float32Array(n);
-            for (let i = 0; i < n; i++) {
-              xOut[i] = xMin + (xArray as Uint16Array)[i] * xScale;
-              yOut[i] = yMin + (yArray as Uint16Array)[i] * yScale;
+            // Coerce in case only one axis came back u16 (Path B can
+            // emit either; Path A always emits both).
+            if (!(xArray instanceof Uint16Array)) {
+              xArray = xArray != null ? new Uint16Array(xArray) : null;
             }
-            xArray = xOut;
-            yArray = yOut;
+            if (!(yArray instanceof Uint16Array)) {
+              yArray = yArray != null ? new Uint16Array(yArray) : null;
+            }
+            nextXPacked = xArray as Uint16Array<ArrayBuffer>;
+            nextYPacked = yArray as Uint16Array<ArrayBuffer>;
+            nextBoundsX = [packedBounds.x[0], packedBounds.x[1]];
+            nextBoundsY = [packedBounds.y[0], packedBounds.y[1]];
           } else {
-            // Ensure that the arrays are typed arrays.
             if (xArray != null && !(xArray instanceof Float32Array)) {
               xArray = new Float32Array(xArray);
             }
             if (yArray != null && !(yArray instanceof Float32Array)) {
               yArray = new Float32Array(yArray);
             }
+            nextX = (xArray ?? new Float32Array()) as Float32Array<ArrayBuffer>;
+            nextY = (yArray ?? new Float32Array()) as Float32Array<ArrayBuffer>;
           }
           if (categoryArray != null && !(categoryArray instanceof Uint8Array)) {
             categoryArray = new Uint8Array(categoryArray);
           }
           const t2 = performance.now();
-          xData = xArray;
-          yData = yArray;
+          // Drop prior buffers FIRST so the GC can reclaim them before
+          // we settle into the new ones — without this, on the second
+          // queryResult fire (Mosaic re-emits when filters rebind) the
+          // old + new arrays both stay live for the duration of this
+          // callback, doubling peak heap.
+          xPackedData = null;
+          yPackedData = null;
+          xData = EMPTY_F32;
+          yData = EMPTY_F32;
+          xPackedData = nextXPacked;
+          yPackedData = nextYPacked;
+          coordsBoundsX = nextBoundsX;
+          coordsBoundsY = nextBoundsY;
+          xData = nextX;
+          yData = nextY;
           categoryData = categoryArray;
           updateTooltip(null);
           updateSelection(null);
-          const n = xArray?.length ?? 0;
+          const n = (xArray as any)?.length ?? 0;
           if (n > 1_000_000) {
-            const mb = (xArray.byteLength + yArray.byteLength + (categoryArray?.byteLength ?? 0)) / 1024 / 1024;
+            const mb = (((xArray as any)?.byteLength ?? 0) + ((yArray as any)?.byteLength ?? 0) + (categoryArray?.byteLength ?? 0)) / 1024 / 1024;
+            const path = nextXPacked != null ? "u16-direct" : "f32";
             console.log(
-              `[scatter] ${n.toLocaleString()} pts (${mb.toFixed(0)} MB JS heap) | toArray=${(t1 - t0).toFixed(0)} ms | typed-array-coerce=${(t2 - t1).toFixed(0)} ms`,
+              `[scatter] ${n.toLocaleString()} pts (${mb.toFixed(0)} MB JS heap, ${path}) | toArray=${(t1 - t0).toFixed(0)} ms | typed-array-coerce=${(t2 - t1).toFixed(0)} ms`,
             );
           }
         },
@@ -650,7 +693,15 @@
   pixelRatio={pixelRatio ?? 2}
   theme={theme}
   config={config}
-  data={{ x: xData, y: yData, category: categoryData }}
+  data={{
+    x: xData,
+    y: yData,
+    xPacked: xPackedData,
+    yPacked: yPackedData,
+    coordsBoundsX: coordsBoundsX,
+    coordsBoundsY: coordsBoundsY,
+    category: categoryData,
+  }}
   yIsAlreadyMercator={yIsAlreadyMercator}
   totalCount={totalCount}
   maxDensity={maxDensity}

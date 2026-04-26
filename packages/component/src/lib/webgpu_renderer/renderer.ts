@@ -24,6 +24,7 @@ import { makeDrawPointsCommand, makeDrawPointsCompactedCommand, makeDrawPointsDo
 import { makeGammaCorrectionCommand } from "./gamma_correction.js";
 import { makeGaussianBlurCommand } from "./gaussian_blur.js";
 import { kdeConfig } from "./kde_config.js";
+import { makeUnpackAxisResources, makeUnpackPipeline, runUnpack, type UnpackAxisResources, type UnpackPipeline } from "./unpack.js";
 
 import programCode from "./program.wgsl?raw";
 
@@ -47,6 +48,19 @@ import programCode from "./program.wgsl?raw";
  *  Host-side the blur buffer size doubles from 2 to 4 bytes per cell
  *  (see blurBufferSize below).
  */
+/** Sentinel ``Float32Array`` used to "park" the f32 fill path while the
+ *  packed (u16 → GPU compute unpack) path drives the storage buffers.
+ *  Reusing one fixed reference makes ``gpuBufferData``'s identity check
+ *  short-circuit to a no-op (it sees ``state.data === EMPTY_F32`` on
+ *  every subsequent setProps and skips the writeBuffer). */
+const EMPTY_F32: Float32Array<ArrayBuffer> = new Float32Array(new ArrayBuffer(0));
+
+function boundsEqual(a: [number, number] | null, b: [number, number] | null): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  return a[0] === b[0] && a[1] === b[1];
+}
+
 function f32ProgramOf(src: string): string {
   return src
     .replace(/^enable f16;\s*$/m, "// enable f16; // stripped for f32 fallback path")
@@ -73,6 +87,22 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
   private renderInputs: RenderInputs;
   private dataBuffers: DataBuffers;
   private renderer: Node<(props: EmbeddingRendererProps, textureView: GPUTextureView) => void>;
+  /** GPU-side u16 unpack pipeline + per-axis source/uniform buffers, used
+   *  whenever ``setProps`` receives ``xPacked``/``yPacked``. The downstream
+   *  ``dataBuffers.x``/``y`` f32 storage buffers are filled by this
+   *  pipeline rather than by a JS-side ``Float32Array(N)`` allocation. */
+  private unpack: UnpackPipeline;
+  private xUnpackResources: UnpackAxisResources;
+  private yUnpackResources: UnpackAxisResources;
+  /** Last (xPacked, yPacked) values fed through the unpack pipeline. We
+   *  re-run the unpack only when the buffer reference *or* the bounds
+   *  change — Mosaic occasionally re-emits the same arrow batch on a
+   *  filter rebind, and a redundant 322 M-element compute dispatch is
+   *  expensive enough to make worth skipping. */
+  private lastXPacked: Uint16Array<ArrayBuffer> | null = null;
+  private lastYPacked: Uint16Array<ArrayBuffer> | null = null;
+  private lastCoordsBoundsX: [number, number] | null = null;
+  private lastCoordsBoundsY: [number, number] | null = null;
 
   constructor(
     context: GPUCanvasContext,
@@ -91,6 +121,10 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
       colorScheme: "light",
       x: new Float32Array(),
       y: new Float32Array(),
+      xPacked: null,
+      yPacked: null,
+      coordsBoundsX: null,
+      coordsBoundsY: null,
       category: null,
 
       categoryCount: 1,
@@ -127,6 +161,12 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
     this.renderInputs = {
       mode: df.value(this.props.mode),
       colorScheme: df.value(this.props.colorScheme),
+      // ``count`` is the canonical source of truth for buffer sizing —
+      // it is set by ``setProps`` from whichever input is active
+      // (``x.length`` or ``xPacked.length``). Keeping it separate from
+      // ``xData`` lets the f32 storage buffer be sized correctly even
+      // when the f32 path is dormant (packed mode).
+      count: df.value(0),
       xData: df.value(this.props.x),
       yData: df.value(this.props.y),
       categoryData: df.value(this.props.category),
@@ -142,6 +182,13 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
     };
     this.device = df.value(device);
     this.dataBuffers = makeDataBuffers(df, this.device, this.renderInputs);
+    // Unpack resources live in the same dataflow so they share the
+    // device's lifetime. The pipeline itself is cheap to compile (one
+    // ~30-line WGSL kernel); per-axis u16 source buffers are sized to
+    // ``count`` and grow with the dataset.
+    this.unpack = makeUnpackPipeline(df, this.device);
+    this.xUnpackResources = makeUnpackAxisResources(df, this.device, this.renderInputs.count);
+    this.yUnpackResources = makeUnpackAxisResources(df, this.device, this.renderInputs.count);
     const moduleCode = this.useF16 ? programCode : f32ProgramOf(programCode);
     this.module = df.derive([this.device], (device) => device.createShaderModule({ code: moduleCode }));
     this.uniforms = makeModuleUniforms(df, this.device);
@@ -173,10 +220,31 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
       this.props.height,
       this.props.isGis,
     );
+    // Decide which fill path is active. Packed mode requires both axes
+    // to be u16 + their bounds — partial coverage falls back to the
+    // f32 path (the renderer never mixes fill paths within a frame).
+    const usePacked =
+      this.props.xPacked != null &&
+      this.props.yPacked != null &&
+      this.props.coordsBoundsX != null &&
+      this.props.coordsBoundsY != null;
+    const count = usePacked
+      ? (this.props.xPacked!.length)
+      : this.props.x.length;
+    this.renderInputs.count.value = count;
     this.renderInputs.mode.value = this.props.mode;
     this.renderInputs.colorScheme.value = this.props.colorScheme;
-    this.renderInputs.xData.value = this.props.x;
-    this.renderInputs.yData.value = this.props.y;
+    if (usePacked) {
+      // Park the f32 path on a fixed empty array so ``gpuBufferData``
+      // sees an unchanged reference and skips its writeBuffer call —
+      // the f32 storage buffer is filled by the unpack compute pass
+      // below instead.
+      if (this.renderInputs.xData.value !== EMPTY_F32) this.renderInputs.xData.value = EMPTY_F32;
+      if (this.renderInputs.yData.value !== EMPTY_F32) this.renderInputs.yData.value = EMPTY_F32;
+    } else {
+      this.renderInputs.xData.value = this.props.x;
+      this.renderInputs.yData.value = this.props.y;
+    }
     this.renderInputs.categoryData.value = this.props.category;
     this.renderInputs.categoryColors.value = this.props.categoryColors;
     if (this.props.category != null) {
@@ -191,7 +259,64 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
     this.renderInputs.densityBandwidth.value = this.props.densityBandwidth;
     this.renderInputs.downsampleMaxPoints.value = this.props.downsampleMaxPoints;
     this.renderInputs.downsampleDensityWeight.value = this.props.downsampleDensityWeight;
+
+    if (usePacked) {
+      this.maybeRunUnpack(
+        this.props.xPacked!,
+        this.props.yPacked!,
+        this.props.coordsBoundsX!,
+        this.props.coordsBoundsY!,
+        count,
+      );
+    }
     return needsRender;
+  }
+
+  /** Run the GPU u16 → f32 unpack pass when (a) the packed buffer
+   *  reference changed *or* (b) the bounds changed. We materialise
+   *  ``dataBuffers.x``/``y`` first (their factories observe the new
+   *  ``count``) so they're sized to fit before the unpack writes into
+   *  them. Skipped on identical re-emit — Mosaic occasionally re-fires
+   *  the same arrow batch, and a redundant 322 M-element compute
+   *  dispatch costs both watt-hours and post-pan latency. */
+  private maybeRunUnpack(
+    xPacked: Uint16Array<ArrayBuffer>,
+    yPacked: Uint16Array<ArrayBuffer>,
+    boundsX: [number, number],
+    boundsY: [number, number],
+    count: number,
+  ): void {
+    const sameX = this.lastXPacked === xPacked && boundsEqual(this.lastCoordsBoundsX, boundsX);
+    const sameY = this.lastYPacked === yPacked && boundsEqual(this.lastCoordsBoundsY, boundsY);
+    if (sameX && sameY) {
+      return;
+    }
+    const xDest = this.dataBuffers.x.value;
+    const yDest = this.dataBuffers.y.value;
+    const xU16 = this.xUnpackResources.u16Buffer.value;
+    const yU16 = this.yUnpackResources.u16Buffer.value;
+    const xUni = this.xUnpackResources.uniformBuffer.value;
+    const yUni = this.yUnpackResources.uniformBuffer.value;
+    const pipeline = this.unpack.pipeline.value;
+    const layout = this.unpack.bindGroupLayout.value;
+    if (!sameX) {
+      this.gpuDevice.queue.writeBuffer(xU16, 0, xPacked.buffer, xPacked.byteOffset, xPacked.byteLength);
+      runUnpack(this.gpuDevice, pipeline, layout, { u16Buffer: xU16, uniformBuffer: xUni }, xDest, count, {
+        min: boundsX[0],
+        max: boundsX[1],
+      });
+      this.lastXPacked = xPacked;
+      this.lastCoordsBoundsX = [boundsX[0], boundsX[1]];
+    }
+    if (!sameY) {
+      this.gpuDevice.queue.writeBuffer(yU16, 0, yPacked.buffer, yPacked.byteOffset, yPacked.byteLength);
+      runUnpack(this.gpuDevice, pipeline, layout, { u16Buffer: yU16, uniformBuffer: yUni }, yDest, count, {
+        min: boundsY[0],
+        max: boundsY[1],
+      });
+      this.lastYPacked = yPacked;
+      this.lastCoordsBoundsY = [boundsY[0], boundsY[1]];
+    }
   }
 
   render(): void {
@@ -238,6 +363,10 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
 export interface RenderInputs {
   mode: ValueNode<RenderMode>;
   colorScheme: ValueNode<"light" | "dark">;
+  /** Canonical point count — drives storage-buffer sizing regardless of
+   *  whether the active fill path is f32 (``xData``) or packed u16
+   *  (``setProps`` runs the unpack compute pass). */
+  count: ValueNode<number>;
   xData: ValueNode<Float32Array<ArrayBuffer>>;
   yData: ValueNode<Float32Array<ArrayBuffer>>;
   categoryData: ValueNode<Uint8Array<ArrayBuffer> | null>;
@@ -270,8 +399,13 @@ export interface AuxiliaryResources {
 
 function makeDataBuffers(df: Dataflow, device: Node<GPUDevice>, inputs: RenderInputs): DataBuffers {
   let usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
-  const count = df.derive([inputs.xData], (d: ArrayLike<number>) => d.length);
-  const xyDataSize = df.derive([count], (c) => c * 4);
+  // ``inputs.count`` is the renderer-set canonical count. In the f32
+  // fill path it equals ``xData.length`` (set in ``setProps``); in the
+  // packed path the renderer sets it from ``xPacked.length`` and writes
+  // the f32 buffer through the unpack compute pass instead of through
+  // ``gpuBufferData``.
+  const count = inputs.count;
+  const xyDataSize = df.derive([count], (c: number) => c * 4);
   const categoryDataSize = count;
   const xBuffer = df.statefulDerive(
     [device, df.statefulDerive([device, xyDataSize, usage], gpuBuffer), inputs.xData],

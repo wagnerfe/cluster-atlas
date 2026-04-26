@@ -10,6 +10,18 @@ export interface EmbeddingRendererProps {
 
   x: Float32Array<ArrayBuffer>;
   y: Float32Array<ArrayBuffer>;
+  /** Optional u16-packed coordinate input. When set, ``x``/``y`` are
+   *  ignored and the renderer unpacks ``xPacked``/``yPacked`` on the GPU
+   *  using ``coordsBoundsX``/``coordsBoundsY`` as the linear inverse-map.
+   *  Saves the JS-side ``Float32Array(N)`` allocation that doubles the
+   *  resident wire payload — at 322 M points that is 2.576 GB of heap
+   *  the user's tab cannot afford. */
+  xPacked?: Uint16Array<ArrayBuffer> | null;
+  yPacked?: Uint16Array<ArrayBuffer> | null;
+  /** Inverse-map bounds for u16 unpack: ``f32 = min + (u16 / 65535) * (max - min)``.
+   *  Only consulted when ``xPacked``/``yPacked`` is set. */
+  coordsBoundsX?: [number, number] | null;
+  coordsBoundsY?: [number, number] | null;
   category: Uint8Array<ArrayBuffer> | null;
 
   categoryCount: number;

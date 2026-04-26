@@ -4,6 +4,12 @@
     data: {
       x: Float32Array<ArrayBuffer>;
       y: Float32Array<ArrayBuffer>;
+      /** When set, ``x``/``y`` are ignored and the renderer unpacks
+       *  these via a one-shot u16 → f32 GPU compute pass. */
+      xPacked?: Uint16Array<ArrayBuffer> | null;
+      yPacked?: Uint16Array<ArrayBuffer> | null;
+      coordsBoundsX?: [number, number] | null;
+      coordsBoundsY?: [number, number] | null;
       category: Uint8Array<ArrayBuffer> | null;
     };
     /** Set when the parent already projected ``data.y`` to Mercator on
@@ -493,6 +499,15 @@
       height: pixelHeight,
       x: data.x,
       y: internalDataY,
+      // Packed pass-through. When set, the renderer ignores ``x``/``y``
+      // and unpacks via the GPU compute pass — see ``unpack.wgsl``.
+      // ``yIsAlreadyMercator`` is enforced upstream in
+      // ``EmbeddingViewMosaic`` (always true for the precomputed-u16
+      // path), so the renderer never needs to re-project these.
+      xPacked: data.xPacked ?? null,
+      yPacked: data.yPacked ?? null,
+      coordsBoundsX: data.coordsBoundsX ?? null,
+      coordsBoundsY: data.coordsBoundsY ?? null,
       category: data.category,
       categoryCount,
       categoryColors: resolvedCategoryColors,
@@ -569,7 +584,12 @@
     const localCanvas = canvas;
     const dev = (renderer as any).gpuDevice as GPUDevice | undefined;
     const t0 = performance.now();
-    const count = renderer.props.x?.length ?? 0;
+    // Count must reflect whichever fill path is active. On the packed
+    // (u16-direct) path ``props.x`` is the empty sentinel and the real
+    // length lives on ``props.xPacked`` — without this, the
+    // first-frame flag and the perf log were silently disabled at
+    // 322 M scale.
+    const count = (renderer.props.xPacked?.length ?? 0) || (renderer.props.x?.length ?? 0);
     const perfOn = isPerfEnabled();
     if (perfOn && count > 1_000_000) {
       const w: any = window as any;
