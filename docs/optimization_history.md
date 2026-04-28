@@ -150,6 +150,7 @@ the next non-null `xPacked` arrived. Between filter clicks the old
 1.3 GB+1.3 GB stayed alive alongside the new 1.3 GB allocation.
 
 Fix (`packages/component/src/lib/webgpu_renderer/renderer.ts`):
+
 1. In `setProps`, when `usePacked === false`, null out `this.lastXPacked`,
    `lastYPacked`, `lastCoordsBoundsX`, `lastCoordsBoundsY` immediately.
 2. In `maybeRunUnpack`, if `runX`/`runY` will trigger a fresh unpack, drop
@@ -174,6 +175,7 @@ only happens at the **next** microtask boundary. We were calling
 `setProps` not having run yet.
 
 Fix (`packages/component/.../EmbeddingViewMosaic.svelte`):
+
 1. Make `queryResult` async.
 2. After nulling `xPackedData`/`yPackedData`/`xData`/`yData`/`categoryData`,
    `await new Promise(r => setTimeout(r, 0))` to let Svelte flush + the
@@ -199,6 +201,7 @@ heap at 322 M during a re-fetch is ~5.8 GB, and accumulated retained Arrow
 pinning + sidebar state pushed us to 9–10 GB during long sessions.
 
 Fix (`apps/desktop/electron/main.ts`):
+
 ```ts
 app.commandLine.appendSwitch("js-flags", "--max-old-space-size=16384 --expose-gc");
 ```
@@ -206,7 +209,7 @@ app.commandLine.appendSwitch("js-flags", "--max-old-space-size=16384 --expose-gc
 The `--expose-gc` is the second half: without it, the
 `if (numRows > 50M) globalThis.gc()` in `queryResult` is a no-op.
 
-Lesson: V8 *budget* is not resident memory — pages are only committed when
+Lesson: V8 _budget_ is not resident memory — pages are only committed when
 touched. There is no penalty for a generous old-generation cap; the
 penalty is only paid when fragmentation forces a major GC. Be generous.
 
@@ -223,10 +226,9 @@ the shader's `category_idx % category_count` clamp degenerated all
 points to category 0.
 
 Fix:
+
 ```svelte
-categoryCount={categoryColors != null && categoryColors.length > 1
-  ? categoryColors.length
-  : categoryCount}
+categoryCount={categoryColors != null && categoryColors.length > 1 ? categoryColors.length : categoryCount}
 ```
 
 Lesson: when a value is "1 by default but overridden by another prop,"
@@ -374,7 +376,7 @@ effect on the running app.
 
 Root cause: PyInstaller's `--onedir` mode bundles all Python source into
 a single PYZ archive inside the launcher binary. The `_internal/*.py`
-files visible on disk are *stale unpacked copies* used for imports that
+files visible on disk are _stale unpacked copies_ used for imports that
 PyInstaller couldn't statically resolve. The PYZ is the source of truth.
 
 Lesson: only `npm run build:sidecar` (which re-runs PyInstaller) ships
@@ -406,9 +408,11 @@ gave a different angle:
 
 Connect to the Electron renderer via Chrome DevTools Protocol on a
 debug port:
+
 ```bash
 GEOSPATIAL_ATLAS_DEBUG_PORT=9222 ./Geospatial\ Atlas.app/...
 ```
+
 Then take heap snapshots at: cold load, after first scatter, after first
 filter click, after multiple filter clicks. Compare retained sizes per
 class. The leak shows up as a constructor (e.g. `Uint32Array`) whose
@@ -419,6 +423,7 @@ retained bytes grow monotonically while the count grows in lockstep.
 `HeapProfiler.takeHeapSnapshot` returns a graph; the parser at
 `/tmp/parse-heap.mjs` walks **back-edges** from the largest objects to
 find what's pinning them. This is how we discovered:
+
 - The 627 MiB Uint32Arrays were pinned via `lastXPacked@bRe` (the
   minified renderer instance).
 - The 2-MiB Arrow Vector chunks were pinned via
@@ -441,25 +446,25 @@ where it had previously OOM'd — proof the fix held.
 
 ## 6. What worked, with measured impact
 
-| Change                                                            | Before                              | After                                | Notes                                                         |
-| ----------------------------------------------------------------- | ----------------------------------- | ------------------------------------ | ------------------------------------------------------------- |
-| `coordinator.manager.cache(false)`                                | 8+ GiB pinned in `clientCache`      | 0 retained Arrow Tables              | Single-line change; biggest absolute win                      |
-| Drop `lastXPacked`/`lastYPacked` on null-input                    | 4 × 627 MiB stuck Uint32Arrays      | Arrays freed on next major GC        | Renderer-side identity-cache fix                              |
-| Drop those refs again pre-unpack                                  | Old + new co-existed during await   | Only new lives during await          | Prevents 2× ArrayBuffer pressure window                       |
-| `queryResult` async + `setTimeout(0)` yield                       | Same-microtask alloc OOM'd at 158 M | 1205 MB peak, 338 ms `toArray`       | The microtask-boundary fix                                    |
-| Gated `globalThis.gc()` at >50 M rows                             | Major GC waited for alloc failure   | Forced sweep before next alloc       | Requires Electron `--expose-gc`                               |
-| `--max-old-space-size=16384`                                      | 12 GB tight in long sessions        | Headroom against fragmentation       | V8 budget != resident memory                                  |
-| `categoryCount` override at the prop site                         | Canvas blue with `c` column         | All categories render correctly      | Single misplaced default                                      |
-| u32 packed wire (1.5 cm quantum)                                  | u16 grid visible at city zoom       | Sub-pixel at all zoom levels         | 8 bytes/pt over 4; zstd halves the cost                       |
-| `streamingRestConnector`                                          | `Failed to fetch` at 2.1 GB         | 322 M scatter wire works             | Bypasses fetch-pipeline 2 GB cap                              |
-| `con.sql(...).fetch_arrow_table()`                                | 90 s cold load                      | 9 s cold load                        | Use relation API for any large arrow export                   |
-| `ORDER BY __row_index__` in split-scatter                         | Random point positions              | Stable alignment                     | DuckDB parallel exec re-orders SELECTs                        |
-| `arrow_cache.put_pinned()` for prewarm                            | Silent drop at >1 GB                | Prewarm actually populates           | `put()` is size-capped silently                               |
-| Chunked `drawPoints` (≤64 M instances/buffer)                     | Metal watchdog trips at 322 M       | All zooms render                     | Per-buffer 5 s limit, not per-frame                           |
-| WG-local atomic reduction in `viewport_cull`                      | Per-pass cost grew with N           | Flat per-chunk cost                  | Pairs with chunked dispatch                                   |
-| `device.queue.onSubmittedWorkDone()` before `gpuBuffer.destroy()` | Random NaN after pan-release        | Stable pan                           | Metal silently corrupts on in-flight destroy                  |
-| Skip accumulate at `N > 50 M && zoomScale < 0.5`                  | 10+ s zoom-out freeze               | Smooth zoom-out                      | Pass produces nothing visible at world view anyway            |
-| Spatial-sort table at materialise                                 | Tooltip pick lookup linear-scanned  | Sub-ms tooltip                       | Co-locates points that share a tile                           |
+| Change                                                            | Before                              | After                           | Notes                                              |
+| ----------------------------------------------------------------- | ----------------------------------- | ------------------------------- | -------------------------------------------------- |
+| `coordinator.manager.cache(false)`                                | 8+ GiB pinned in `clientCache`      | 0 retained Arrow Tables         | Single-line change; biggest absolute win           |
+| Drop `lastXPacked`/`lastYPacked` on null-input                    | 4 × 627 MiB stuck Uint32Arrays      | Arrays freed on next major GC   | Renderer-side identity-cache fix                   |
+| Drop those refs again pre-unpack                                  | Old + new co-existed during await   | Only new lives during await     | Prevents 2× ArrayBuffer pressure window            |
+| `queryResult` async + `setTimeout(0)` yield                       | Same-microtask alloc OOM'd at 158 M | 1205 MB peak, 338 ms `toArray`  | The microtask-boundary fix                         |
+| Gated `globalThis.gc()` at >50 M rows                             | Major GC waited for alloc failure   | Forced sweep before next alloc  | Requires Electron `--expose-gc`                    |
+| `--max-old-space-size=16384`                                      | 12 GB tight in long sessions        | Headroom against fragmentation  | V8 budget != resident memory                       |
+| `categoryCount` override at the prop site                         | Canvas blue with `c` column         | All categories render correctly | Single misplaced default                           |
+| u32 packed wire (1.5 cm quantum)                                  | u16 grid visible at city zoom       | Sub-pixel at all zoom levels    | 8 bytes/pt over 4; zstd halves the cost            |
+| `streamingRestConnector`                                          | `Failed to fetch` at 2.1 GB         | 322 M scatter wire works        | Bypasses fetch-pipeline 2 GB cap                   |
+| `con.sql(...).fetch_arrow_table()`                                | 90 s cold load                      | 9 s cold load                   | Use relation API for any large arrow export        |
+| `ORDER BY __row_index__` in split-scatter                         | Random point positions              | Stable alignment                | DuckDB parallel exec re-orders SELECTs             |
+| `arrow_cache.put_pinned()` for prewarm                            | Silent drop at >1 GB                | Prewarm actually populates      | `put()` is size-capped silently                    |
+| Chunked `drawPoints` (≤64 M instances/buffer)                     | Metal watchdog trips at 322 M       | All zooms render                | Per-buffer 5 s limit, not per-frame                |
+| WG-local atomic reduction in `viewport_cull`                      | Per-pass cost grew with N           | Flat per-chunk cost             | Pairs with chunked dispatch                        |
+| `device.queue.onSubmittedWorkDone()` before `gpuBuffer.destroy()` | Random NaN after pan-release        | Stable pan                      | Metal silently corrupts on in-flight destroy       |
+| Skip accumulate at `N > 50 M && zoomScale < 0.5`                  | 10+ s zoom-out freeze               | Smooth zoom-out                 | Pass produces nothing visible at world view anyway |
+| Spatial-sort table at materialise                                 | Tooltip pick lookup linear-scanned  | Sub-ms tooltip                  | Co-locates points that share a tile                |
 
 ## 7. What did NOT work — failed attempts that ate time
 
@@ -494,7 +499,7 @@ could not force a sweep between releasing old buffers and allocating new
 ones — fragmentation pinned the heap and the very next scatter still
 threw `RangeError`. Budget was necessary but not sufficient.
 
-**Lesson:** budget is allocator headroom; it does not change *when* GC
+**Lesson:** budget is allocator headroom; it does not change _when_ GC
 runs. Pair budget bumps with `--expose-gc` + explicit `globalThis.gc()`
 sweeps at the points where you know you just released large buffers.
 
@@ -550,7 +555,7 @@ constraint is per-buffer, not per-frame; split the work, don't drop it.
 `apps/desktop/release/.../sidecar/_internal/embedding_atlas/`.
 
 **Why it failed:** PyInstaller `--onedir` ships compiled bytecode in a
-PYZ archive. The `_internal/*.py` files are *stale unpacked copies* used
+PYZ archive. The `_internal/*.py` files are _stale unpacked copies_ used
 only as fallback for unresolved imports. Edits never run.
 
 **Lesson:** only `npm run build:sidecar` ships Python changes. The visible
@@ -682,11 +687,11 @@ first time; documented to recognise on sight.
 
 The repo ships **three distros**:
 
-| Distro                  | Entry                              | Browser                       | Sidecar              | DuckDB           |
-| ----------------------- | ---------------------------------- | ----------------------------- | -------------------- | ---------------- |
-| **standalone web**      | `FileViewer.svelte`                | any (Chrome/Safari/Firefox)   | none                 | DuckDB-WASM      |
-| **backend-frontend**    | `Viewer.svelte` via `embedding-atlas` CLI | user-chosen (typically Chrome) | uvicorn HTTP, native | server-side, native |
-| **desktop (standalone)** | `Viewer.svelte` inside Electron     | bundled Chromium              | embedded sidecar     | server-side, native |
+| Distro                   | Entry                                     | Browser                        | Sidecar              | DuckDB              |
+| ------------------------ | ----------------------------------------- | ------------------------------ | -------------------- | ------------------- |
+| **standalone web**       | `FileViewer.svelte`                       | any (Chrome/Safari/Firefox)    | none                 | DuckDB-WASM         |
+| **backend-frontend**     | `Viewer.svelte` via `embedding-atlas` CLI | user-chosen (typically Chrome) | uvicorn HTTP, native | server-side, native |
+| **desktop (standalone)** | `Viewer.svelte` inside Electron           | bundled Chromium               | embedded sidecar     | server-side, native |
 
 Every fix from sections 1–8 ships to **all three** because they live in
 shared packages (`packages/component`, `packages/viewer`,
@@ -702,23 +707,24 @@ makes long sessions unstable.
 
 What ships to Chrome via `npm run build` → `backend/static/`:
 
-| Fix                                          | Ships to Chrome? | Effective?                                  |
-| -------------------------------------------- | ---------------- | ------------------------------------------- |
-| `coordinator.manager.cache(false)`           | Yes              | Yes — biggest absolute win                  |
-| Renderer drops `lastXPacked` on null-input   | Yes              | Yes                                         |
-| Renderer drops refs pre-unpack               | Yes              | Yes                                         |
-| `queryResult` async + `setTimeout(0)` yield  | Yes              | Yes                                         |
-| Forced `globalThis.gc()` gated >50 M         | Yes              | **No** — `gc` is undefined; branch no-ops   |
-| `--max-old-space-size=16384`                 | **No**           | Chrome defaults to ~4 GB old-gen per tab    |
-| `--expose-gc`                                | **No**           | Same — Chrome flag, not page-level          |
-| `categoryCount` override                     | Yes              | Yes                                         |
-| u32 packed wire + streaming connector        | Yes              | Yes                                         |
-| Spatial-sort at materialise (server-side)    | Yes              | Yes                                         |
-| Chunked draw / WG-local atomic reduction     | Yes              | Yes                                         |
-| `device.queue.onSubmittedWorkDone()` destroy | Yes              | Yes                                         |
-| Skip accumulate at huge N                    | Yes              | Yes                                         |
+| Fix                                          | Ships to Chrome? | Effective?                                |
+| -------------------------------------------- | ---------------- | ----------------------------------------- |
+| `coordinator.manager.cache(false)`           | Yes              | Yes — biggest absolute win                |
+| Renderer drops `lastXPacked` on null-input   | Yes              | Yes                                       |
+| Renderer drops refs pre-unpack               | Yes              | Yes                                       |
+| `queryResult` async + `setTimeout(0)` yield  | Yes              | Yes                                       |
+| Forced `globalThis.gc()` gated >50 M         | Yes              | **No** — `gc` is undefined; branch no-ops |
+| `--max-old-space-size=16384`                 | **No**           | Chrome defaults to ~4 GB old-gen per tab  |
+| `--expose-gc`                                | **No**           | Same — Chrome flag, not page-level        |
+| `categoryCount` override                     | Yes              | Yes                                       |
+| u32 packed wire + streaming connector        | Yes              | Yes                                       |
+| Spatial-sort at materialise (server-side)    | Yes              | Yes                                       |
+| Chunked draw / WG-local atomic reduction     | Yes              | Yes                                       |
+| `device.queue.onSubmittedWorkDone()` destroy | Yes              | Yes                                       |
+| Skip accumulate at huge N                    | Yes              | Yes                                       |
 
 **Practical Chrome behaviour at 322 M:**
+
 - Cold load + first scatter: peak heap ~2.5 GB. **Fits Chrome's ~4 GB
   cap.** Works.
 - First filter click with `c` column: transient peak ~3.5–4 GB without
@@ -808,17 +814,17 @@ column**, with a secondary ceiling at **end-to-end filter latency**.
 
 Measured on the working build (commit `99b73a6`, M-series, 32 GB):
 
-| Phase                                       | Duration       | Blocking?           | Where                                                |
-| ------------------------------------------- | -------------- | ------------------- | ---------------------------------------------------- |
-| Sidecar SQL → arrow                         | ~3–5 s         | No (server-side)    | `embedding_atlas/connector` (DuckDB, fast_load)      |
-| Wire transfer (zstd, ~1.5 GB)               | ~1.5–2 s       | No (streamed)       | `streamingRestConnector`                             |
-| `data.getChild("c").toArray()`              | **~1.8 s**     | **Yes (main JS)**   | `EmbeddingViewMosaic.queryResult`                    |
-| `data.getChild("x").toArray()`              | ~520 ms        | Yes (main JS)       | same                                                 |
-| `data.getChild("y").toArray()`              | ~500 ms        | Yes (main JS)       | same                                                 |
-| Forced `globalThis.gc()`                    | ~200–500 ms    | Yes (main JS)       | gated >50 M                                          |
-| GPU upload (3 buffers, ~3 GB)               | ~300–600 ms    | No (queued)         | `renderer.setProps`                                  |
-| First frame render                          | ~120 ms        | No                  | chunked `drawPoints`                                 |
-| **Total wall clock filter → painted pixel** | **~7–10 s**    |                     |                                                      |
+| Phase                                       | Duration    | Blocking?         | Where                                           |
+| ------------------------------------------- | ----------- | ----------------- | ----------------------------------------------- |
+| Sidecar SQL → arrow                         | ~3–5 s      | No (server-side)  | `embedding_atlas/connector` (DuckDB, fast_load) |
+| Wire transfer (zstd, ~1.5 GB)               | ~1.5–2 s    | No (streamed)     | `streamingRestConnector`                        |
+| `data.getChild("c").toArray()`              | **~1.8 s**  | **Yes (main JS)** | `EmbeddingViewMosaic.queryResult`               |
+| `data.getChild("x").toArray()`              | ~520 ms     | Yes (main JS)     | same                                            |
+| `data.getChild("y").toArray()`              | ~500 ms     | Yes (main JS)     | same                                            |
+| Forced `globalThis.gc()`                    | ~200–500 ms | Yes (main JS)     | gated >50 M                                     |
+| GPU upload (3 buffers, ~3 GB)               | ~300–600 ms | No (queued)       | `renderer.setProps`                             |
+| First frame render                          | ~120 ms     | No                | chunked `drawPoints`                            |
+| **Total wall clock filter → painted pixel** | **~7–10 s** |                   |                                                 |
 
 The category-column `toArray()` at 1.8 s is the longest blocking JS
 phase. Filter clicks therefore have a ~3 s perceived latency floor (the
@@ -965,20 +971,20 @@ scratch.
 
 ## Quick-reference cheat sheet
 
-| Symptom                                       | First place to look                                                                                |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `Array buffer allocation failed` mid-session  | Heap snapshot retainer chain — almost always Mosaic LRU + renderer ref-pinning compounding         |
-| Empty/blue scatter at 322 M with `c` column   | `EmbeddingViewMosaic.svelte` line 752 `categoryCount` override                                     |
-| Empty Electron map after dataset switch       | `viewer-state.json` stale entry — purge before re-debugging the pipeline                           |
-| Edits to component not reaching desktop app   | Rebuild order: component → viewer → sidecar → sync to .app                                         |
-| `Failed to fetch` at 2 GB scatter wire        | `Response.arrayBuffer()` ~2 GB cap — use `streamingRestConnector`                                  |
-| Visible coordinate grid at city zoom          | Wire format is u16; switch to u32 packed (1.5 cm quantum)                                          |
-| `MTLCommandBuffer execution failed` on pan    | Chunk the offending compute or draw pass; cap chunk size at <64 M instances                        |
-| NaN compute output after rapid pan-release    | `gpuBuffer.destroy()` must be wrapped in `device.queue.onSubmittedWorkDone()`                      |
-| Slow cold parquet load                        | Use `con.sql(...).fetch_arrow_table()`, not `cursor.execute(...)`                                  |
-| Random point positions in split-scatter mode  | Add `ORDER BY __row_index__` to every per-axis query                                               |
-| Prewarm appears to succeed but cache is empty | `arrow_cache.put()` silently drops `len > max_bytes` — use `put_pinned()`                          |
-| Filter click leaves canvas blank              | Async-yield required between releasing prior buffers and `toArray()`; check `--expose-gc` is set   |
+| Symptom                                       | First place to look                                                                              |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `Array buffer allocation failed` mid-session  | Heap snapshot retainer chain — almost always Mosaic LRU + renderer ref-pinning compounding       |
+| Empty/blue scatter at 322 M with `c` column   | `EmbeddingViewMosaic.svelte` line 752 `categoryCount` override                                   |
+| Empty Electron map after dataset switch       | `viewer-state.json` stale entry — purge before re-debugging the pipeline                         |
+| Edits to component not reaching desktop app   | Rebuild order: component → viewer → sidecar → sync to .app                                       |
+| `Failed to fetch` at 2 GB scatter wire        | `Response.arrayBuffer()` ~2 GB cap — use `streamingRestConnector`                                |
+| Visible coordinate grid at city zoom          | Wire format is u16; switch to u32 packed (1.5 cm quantum)                                        |
+| `MTLCommandBuffer execution failed` on pan    | Chunk the offending compute or draw pass; cap chunk size at <64 M instances                      |
+| NaN compute output after rapid pan-release    | `gpuBuffer.destroy()` must be wrapped in `device.queue.onSubmittedWorkDone()`                    |
+| Slow cold parquet load                        | Use `con.sql(...).fetch_arrow_table()`, not `cursor.execute(...)`                                |
+| Random point positions in split-scatter mode  | Add `ORDER BY __row_index__` to every per-axis query                                             |
+| Prewarm appears to succeed but cache is empty | `arrow_cache.put()` silently drops `len > max_bytes` — use `put_pinned()`                        |
+| Filter click leaves canvas blank              | Async-yield required between releasing prior buffers and `toArray()`; check `--expose-gc` is set |
 
 ---
 
@@ -994,6 +1000,7 @@ scratch.
   ~10 minute session of repeated filter toggling.
 
 The settings that got us here:
+
 - `coordinator.manager.cache(false)` in viewer entry points
 - `--max-old-space-size=16384 --expose-gc` in Electron
 - `lastXPacked`/`lastYPacked` released on null-input and pre-unpack
