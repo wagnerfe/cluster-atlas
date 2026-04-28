@@ -35,9 +35,13 @@ Used by:
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import pathlib
+import shutil
+import signal
+import sys
 import tempfile
 import threading
 import time
@@ -47,6 +51,143 @@ from typing import Callable, Literal
 import duckdb
 
 
+# DuckDB temp-directory cleanup
+# -----------------------------
+# Each invocation of ``_safe_memory_temp_settings`` creates a per-process
+# spill directory under ``$TMPDIR`` with the prefix ``duckdb_gsa_``. At
+# 322 M-row scale a single load can spill 100+ GB; without explicit
+# cleanup these dirs leak until macOS's tmp-cleaner sweeps them (which is
+# rare — typically only on reboot, sometimes after several days). One
+# session at a time is fine; four crashed sessions later the user is
+# down 400 GB of disk for no benefit.
+#
+# Strategy: track every dir we create, wipe on normal exit (atexit), wipe
+# on SIGTERM/SIGINT (Electron sends SIGTERM via ``child.kill()``), and
+# sweep stale orphans (>24 h old) from prior crashed sessions at
+# startup. ``ignore_errors=True`` everywhere — cleanup is best-effort,
+# never let it fail the process.
+
+_TEMP_DIR_PREFIX = "duckdb_gsa_"
+_REGISTERED_TEMP_DIRS: set[str] = set()
+_TEMP_DIR_LOCK = threading.Lock()
+_CLEANUP_INSTALLED = False
+_ORPHAN_SWEEP_DONE = False
+_ORPHAN_SWEEP_MAX_AGE_HOURS = 24.0
+
+
+def _cleanup_registered_temp_dirs() -> None:
+    """Remove every duckdb_gsa_* dir registered by this process.
+
+    Safe to call multiple times and from signal handlers — dirs are
+    discarded from the registry as they're removed and ``rmtree`` is
+    invoked with ``ignore_errors=True`` so a partial wipe (e.g. DuckDB
+    finaliser still has an open fd on Windows) doesn't raise.
+    """
+    with _TEMP_DIR_LOCK:
+        dirs = list(_REGISTERED_TEMP_DIRS)
+        _REGISTERED_TEMP_DIRS.clear()
+    for d in dirs:
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            # Defensive: rmtree itself shouldn't raise with ignore_errors=True,
+            # but in cleanup paths we never want to bubble.
+            pass
+
+
+def _purge_stale_orphan_temp_dirs(
+    max_age_hours: float = _ORPHAN_SWEEP_MAX_AGE_HOURS,
+) -> None:
+    """Best-effort sweep of duckdb_gsa_* dirs older than ``max_age_hours``.
+
+    Catches dirs left by sessions that died without atexit running
+    (SIGKILL, segfault, power loss). The age cutoff prevents us from
+    wiping a *parallel* sidecar's active dir — e.g. a CLI invocation
+    while the desktop app is open. 24 h is conservatively long; nobody
+    runs a single DuckDB session for a day, but the OS sweeper is
+    happier reclaiming on its own schedule than us being aggressive.
+    """
+    global _ORPHAN_SWEEP_DONE
+    if _ORPHAN_SWEEP_DONE:
+        return
+    _ORPHAN_SWEEP_DONE = True
+    root = tempfile.gettempdir()
+    cutoff = time.time() - max_age_hours * 3600.0
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    swept = 0
+    for entry in entries:
+        if not entry.startswith(_TEMP_DIR_PREFIX):
+            continue
+        full = os.path.join(root, entry)
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        if st.st_mtime >= cutoff:
+            continue  # younger than cutoff — could belong to a live process
+        try:
+            shutil.rmtree(full, ignore_errors=True)
+            swept += 1
+        except Exception:
+            pass
+    if swept:
+        # Single line on stderr so sidecar logs surface the reclaim event
+        # without spamming healthy startups (which find nothing).
+        print(
+            f"[fast_load] swept {swept} stale duckdb_gsa_* dir(s) older than "
+            f"{max_age_hours:g}h",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _install_cleanup_hooks() -> None:
+    """Register atexit + SIGTERM/SIGINT handlers exactly once.
+
+    Signal handlers can only be installed from the main thread; uvicorn
+    schedules requests on worker threads, so guard with a thread check
+    and fall back to atexit-only on non-main threads (the main thread
+    will install the signal handler when it imports this module from
+    its own context).
+    """
+    global _CLEANUP_INSTALLED
+    if _CLEANUP_INSTALLED:
+        return
+    _CLEANUP_INSTALLED = True
+
+    atexit.register(_cleanup_registered_temp_dirs)
+
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def _signal_handler(signum, frame):
+        _cleanup_registered_temp_dirs()
+        # Restore the default disposition and re-raise so the process
+        # exits as if we hadn't intercepted (correct exit codes,
+        # correct shell behaviour, and parents like Electron see a
+        # clean signal-driven termination).
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
+        try:
+            os.kill(os.getpid(), signum)
+        except OSError:
+            sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _signal_handler)
+        except (ValueError, OSError):
+            # Not all platforms / embedding contexts allow this
+            # (e.g. running inside a thread, or with a custom event
+            # loop that has its own signal multiplexer). Best-effort.
+            pass
+
+
 def _safe_memory_temp_settings() -> tuple[str, str]:
     """Return ``(memory_limit, temp_directory)`` strings safe to apply to
     a fresh ``:memory:`` connection.
@@ -54,7 +195,15 @@ def _safe_memory_temp_settings() -> tuple[str, str]:
     The DuckDB defaults (``80% RAM`` limit, ``.tmp`` relative temp path)
     are the actual cause of large-file CREATE TABLE crashes: spilling
     has no usable scratch dir and no headroom over the OS.
+
+    Side effects: registers the created temp dir for shutdown cleanup
+    (atexit + SIGTERM/SIGINT) and, on first call, sweeps any
+    duckdb_gsa_* dirs older than 24 h that are leftovers from
+    previously-crashed sessions.
     """
+    _install_cleanup_hooks()
+    _purge_stale_orphan_temp_dirs()
+
     try:
         total_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (ValueError, OSError, AttributeError):
@@ -64,15 +213,17 @@ def _safe_memory_temp_settings() -> tuple[str, str]:
     # a 96 GiB cap on a 128 GiB box once consumed enough swap that
     # macOS triggered "system has run out of application memory" and
     # took down the desktop. DuckDB *will* spill when it hits the cap,
-    # which is fine: the 86 GiB of /var temp seen previously was
-    # orphan from prior crashes (purged separately), not a sign that
-    # the limit was too low. Disk-spill at 64 GiB with adequate free
-    # disk is healthy behavior; growing past 64 GiB is not.
+    # which is fine: spilling at 64 GiB with adequate free disk is
+    # healthy behavior. The 700+ GB of orphan /var temp that previously
+    # accumulated was the result of leaked dirs from crashed sessions,
+    # now plugged by the atexit/signal-handler cleanup above.
     limit_bytes = min(int(total_ram * 0.5), 64 * 1024**3)
     limit_str = f"{limit_bytes // (1024**3)}GB"
     # OS tmp dir always exists and has plenty of room; per-process subdir
     # so we never collide with another sidecar / CLI invocation.
-    temp_dir = tempfile.mkdtemp(prefix="duckdb_gsa_")
+    temp_dir = tempfile.mkdtemp(prefix=_TEMP_DIR_PREFIX)
+    with _TEMP_DIR_LOCK:
+        _REGISTERED_TEMP_DIRS.add(temp_dir)
     return limit_str, temp_dir
 
 
