@@ -7,6 +7,95 @@ releases used the `app-vX.Y.Z` prefix). Other streams (Python package,
 static web viewer) have their own changelogs / tag prefixes — see
 [`docs/RELEASING.md`](docs/RELEASING.md).
 
+## v0.0.8 — 2026-04-29
+
+**322 M-row scaling.** Verified end-to-end on the eubucco buildings
+parquet (322,562,870 points, 7.8 GiB on disk) on a 32 GiB Apple
+Silicon laptop. Full color-by + filter interactivity holds at this
+scale; memory pipeline hardened against three independent leaks
+that compounded to OOM the renderer at filter time on v0.0.7.
+
+### Performance — 322 M points
+
+| stage                             | result                              |
+| --------------------------------- | ----------------------------------- |
+| 322 M cold scatter                | 2461 MB JS heap, 520 ms `toArray`   |
+| 322 M with category column        | 2769 MB JS heap, 1.8 s `toArray`    |
+| Filter click → 158 M residential  | 1205 MB JS heap, 338 ms `toArray`   |
+| Tooltip pick at 322 M             | ~50 ms (was ~10 s pre-spatial-sort) |
+| Cold load (parquet → first frame) | 12–15 s end-to-end                  |
+
+### Fixed
+
+- **Color-by + filter clicks no longer OOM at 322 M.** Three leaks
+  combined to exhaust V8's ArrayBuffer pool: Mosaic's `QueryManager`
+  LRU pinned every 2.5 GB Arrow Table for 3 hours, the renderer kept
+  `lastXPacked` / `lastYPacked` alive past consumer null-out, and
+  `queryResult` allocated the new `toArray()` copy in the same
+  microtask that nulled the old buffers. Each survivable alone;
+  together they OOM'd at 322 M. Now: cache disabled, renderer refs
+  released on null-input, `queryResult` is async with a microtask
+  yield + a gated forced GC.
+- **`categoryCount` no longer hardcoded to 1.** Previously poisoned
+  the WGSL category uniform whenever `categoryColors.length > 1`,
+  rendering all points as a single category.
+- **Auto-cleanup of DuckDB spill.** Sessions at this scale spill
+  80–120 GB to `$TMPDIR/duckdb_gsa_*`; previously these leaked until
+  macOS swept them on reboot. Now wiped on `atexit` and on
+  SIGTERM/SIGINT, with stale orphans (>24 h) reclaimed at startup.
+- **`Response.arrayBuffer()` ~2 GB ceiling unblocked.** Custom
+  `streamingRestConnector` reads the response body chunk-by-chunk,
+  bypassing Chrome's fetch-pipeline cap; the wire size limit is now
+  V8's, not the fetch pipeline's.
+- **u32 packed wire format.** u16 over a world-scale bbox quantised
+  to ~5 km — visible coordinate grid at city zoom. u32 quantum is
+  ~8 mm; sub-pixel at any zoom level.
+- **Metal `MTLCommandBuffer` watchdog at 322 M.** Chunked
+  `drawPoints` + WG-local atomic reduction in `viewport_cull` keep
+  every command buffer under the macOS 5 s timeout.
+- **GPU buffer destroy is now device-lost-safe.** Wrapped in
+  `device.queue.onSubmittedWorkDone()` to defer past in-flight
+  command buffers; rapid pan-release no longer poisons the
+  `MTLDevice`.
+- **Tooltip latency at 322 M: ~10 s → ~50 ms.** Background-
+  materialise CTAS now appends `ORDER BY` on the precomputed u32
+  quantised columns; row-group min/max stats become tight enough to
+  prune >99 % of groups for any small-radius tooltip.
+- **Frontend-mode side panel unblocks on plain URLs** — no
+  `?perf=1` required.
+
+### Changed
+
+- **Electron V8 budget: 12 GB → 16 GB**, with `--expose-gc` so the
+  renderer can force a major sweep between releasing the prior
+  batch's typed arrays and allocating the next batch's. Pairs with
+  the sidecar `memory_limit` clamp (50 % RAM, max 64 GB) to keep
+  V8 and DuckDB from contesting RAM.
+- **Mosaic LRU query cache disabled** in both `Viewer.svelte` and
+  `FileViewer.svelte`. Histogram / count re-fetches on filter
+  change cost <50 ms; pinning a 2.5 GB scatter Table for 3 h costs
+  the entire ArrayBuffer pool.
+- **Render every point at world view** — no automatic cap, no
+  sampling. The watchdog is per-buffer, not per-frame; chunking
+  splits the work, never drops it.
+- **DuckDB `con.sql(...).fetch_arrow_table()`** replaces
+  `cursor.execute(...)` for any large arrow export. ~10× faster on
+  multi-GB results (the relation API streams; cursor materialises a
+  full result-set buffer first).
+
+### Added
+
+- **[`docs/optimization_history.md`](docs/optimization_history.md)** —
+  field journal of the 322 M scaling chapter: what worked, what did
+  not, common bananaskins, current bottleneck (synchronous
+  `Arrow.Vector.toArray()` on the category column at ~1.8 s), and
+  prioritised open follow-ups.
+- **README** — replaces hardcoded version-pinned download URLs with
+  `/releases/latest/download/`, adds a Performance table per distro,
+  Troubleshooting (V8 OOM workaround for vanilla Chrome, Metal
+  watchdog freeze, stale `viewer-state.json`, leftover spill), and a
+  Roadmap section organised by layer.
+
 ## v0.0.7 — 2026-04-25
 
 **300 M-row scaling.** The loader, wire transport, and WebGPU renderer
@@ -16,13 +105,13 @@ on a 300 M-row synthetic Europe parquet (6.6 GiB on disk).
 
 ### Performance — 300 M points
 
-| stage                           | result                              |
-| ------------------------------- | ----------------------------------- |
-| `fast_load_parquet` (cold)      | 2.4 s                               |
-| Initial scatter (Arrow IPC)     | 9.4 s for 1.20 GB on the wire       |
-| Color-by category fetch         | 11.9 s for 1.50 GB on the wire      |
-| 10 s scripted pan inside window | 332 CSS-pans : 3 GPU re-renders     |
-| Zoom re-render                  | 1.0 – 1.5 s                         |
+| stage                           | result                          |
+| ------------------------------- | ------------------------------- |
+| `fast_load_parquet` (cold)      | 2.4 s                           |
+| Initial scatter (Arrow IPC)     | 9.4 s for 1.20 GB on the wire   |
+| Color-by category fetch         | 11.9 s for 1.50 GB on the wire  |
+| 10 s scripted pan inside window | 332 CSS-pans : 3 GPU re-renders |
+| Zoom re-render                  | 1.0 – 1.5 s                     |
 
 ### Changed
 
@@ -191,7 +280,7 @@ upstream work:
 - **Unsigned build.** First launch:
   - macOS: right-click → Open, or System Settings → Privacy & Security
     → "Open Anyway".
-  - Windows: SmartScreen warning → *More info → Run anyway*.
+  - Windows: SmartScreen warning → _More info → Run anyway_.
   - Linux: no prompt; `chmod +x` the `.AppImage` before launching.
 - **Only Apple Silicon has been smoke-tested.** The x64 / Linux /
   Windows builds are produced by CI but have not been manually verified.
