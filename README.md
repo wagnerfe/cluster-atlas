@@ -14,7 +14,7 @@ You can load the data from a remote URL too! Clicking this link, you download 10
 
 ## Desktop App Download
 
-All links below resolve to the [latest tagged release](https://github.com/do-me/geospatial-atlas/releases/latest) — no need to update them on every bump. See the [CHANGELOG](CHANGELOG.md) for what's in each version. All bundles are **unsigned**, so every platform needs a one-off bypass step after install — shown per-row below.
+All links below resolve to the [latest tagged release](https://github.com/do-me/geospatial-atlas/releases/latest). See the [CHANGELOG](CHANGELOG.md) for what's in each version. All bundles are **unsigned**, so every platform needs a one-off bypass step after install — shown per-row below.
 
 - **Windows (MSI)** — [geospatial-atlas-windows-x64.msi](https://github.com/do-me/geospatial-atlas/releases/latest/download/geospatial-atlas-windows-x64.msi)
   Double-click; on the SmartScreen warning click **More info → Run anyway**.
