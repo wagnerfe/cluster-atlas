@@ -39,7 +39,15 @@ export async function makeCategoryColumn(
   } else if (jsType == "number" || jsType == "Date") {
     let distinct = await distinctCount(coordinator, table, column);
     if (distinct <= 10) {
-      return await makeDiscreteCategoryColumn(coordinator, table, column, 10, theme);
+      // Numeric / temporal categoricals (e.g. a confidence score with
+      // 10 distinct levels: 0.0, 0.25, …, 0.95) read naturally in
+      // value order. Sorting by count desc — fine for string enums —
+      // shuffles them out of order. ``sortBy: "value"`` orders the
+      // legend by the underlying value asc so the swatches read 0.0 →
+      // 0.95, not 0.95 → 0.0 → 0.75 → 0.5.
+      return await makeDiscreteCategoryColumn(coordinator, table, column, 10, theme, {
+        sortBy: "value",
+      });
     } else {
       return await makeBinnedNumericColumn(coordinator, table, column, theme);
     }
@@ -53,15 +61,23 @@ async function makeDiscreteCategoryColumn(
   column: string,
   maxCategories: number,
   theme: ChartTheme,
+  options: { sortBy?: "count" | "value" } = {},
 ): Promise<EmbeddingLegend> {
   let indexColumnName = `__ev_${column}_id`;
+  // ``sortBy: "value"``: every row in a TEXT-grouped bucket shares the
+  // same underlying value, so ``MIN(column)`` returns that value and
+  // sorts numerically (or chronologically for dates). ``"count"``
+  // (default) keeps the standard most-common-first order for string
+  // enums.
+  let orderbyExpr =
+    options.sortBy === "value" ? SQL.asc(SQL.min(SQL.column(column))) : SQL.desc(SQL.count());
   let values = Array.from(
     await coordinator.query(
       SQL.Query.from(table)
         .select({ value: SQL.cast(SQL.column(column), "TEXT"), count: SQL.count() })
         .where(SQL.not(SQL.isNull(SQL.cast(SQL.column(column), "TEXT"))))
         .groupby(SQL.cast(SQL.column(column), "TEXT"))
-        .orderby(SQL.desc(SQL.count()))
+        .orderby(orderbyExpr)
         .limit(maxCategories),
     ),
   ) as { value: string; count: number }[];
