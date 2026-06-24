@@ -38,6 +38,7 @@ dependencies = [
 
 [project.scripts]
 geospatial-atlas = "embedding_atlas.cli:main"
+geospatial-atlas-match-eval = "embedding_atlas.match_eval:match_eval_cli"
 
 [project.urls]
 homepage = "https://do-me.github.io/geospatial-atlas"
