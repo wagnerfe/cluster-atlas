@@ -1005,68 +1005,38 @@
   });
 
   // ---- Match-Lines overlay (matcher-eval view) ----------------------------
-  // A viewport-culled MapLibre line layer drawn on the same (already
-  // camera-synced) basemap map. Lines are <=400 m, hence sub-pixel below
-  // `minZoom`; we only query + draw the viewport's worth above it. ADR-0001.
-  const LINES_SOURCE_ID = "match-lines-source";
-  const LINES_LAYER_ID = "match-lines-layer";
-  const EMPTY_FC = { type: "FeatureCollection" as const, features: [] };
+  // Viewport-culled Match Lines drawn as SVG in the overlay above, using the
+  // SAME projection as the points (`pointLocation`) so they stay glued to both
+  // the points and the camera-synced basemap. We deliberately do NOT use a
+  // MapLibre GeoJSON layer — GeoJSON source tiling is broken in this app's
+  // bundle (vector tiles work, runtime GeoJSON yields zero features). Lines
+  // are <=400 m, hence sub-pixel below `minZoom`; we only query the viewport's
+  // worth above it. ADR-0001.
+  const LINES_MIN_ZOOM_DEFAULT = 12;
+  const LINE_COLORS: Record<string, string> = {
+    "candidate->baseline": "#2ca02c",
+    "candidate->candidate": "#ff7f0e",
+    "baseline->baseline": "#9467bd",
+  };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let linesRequestSeq = 0;
+  // The current viewport's Match Lines as raw lon/lat endpoints + color.
+  // `pointLocation` projects lat internally, so we pass raw coords straight in.
+  let matchLineRows = $state.raw<{ x1: number; y1: number; x2: number; y2: number; color: string }[]>([]);
 
-  function linesColorExpression(): any {
-    if (lines?.pairType == null) {
-      return "#2ca02c";
-    }
-    return [
-      "match",
-      ["get", "pairType"],
-      "candidate->baseline",
-      "#2ca02c",
-      "candidate->candidate",
-      "#ff7f0e",
-      "baseline->baseline",
-      "#9467bd",
-      "#888888",
-    ];
-  }
-
-  function ensureLinesLayer() {
-    if (!map || lines == null || !map.isStyleLoaded()) {
-      return;
-    }
-    if (map.getSource(LINES_SOURCE_ID)) {
-      return;
-    }
-    map.addSource(LINES_SOURCE_ID, { type: "geojson", data: EMPTY_FC });
-    map.addLayer({
-      id: LINES_LAYER_ID,
-      type: "line",
-      source: LINES_SOURCE_ID,
-      minzoom: lines.minZoom ?? 12,
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: {
-        "line-color": linesColorExpression(),
-        // Match Lines are short (median ~13 m); keep them wide and fully
-        // opaque, and grow with zoom so they read between their endpoint dots.
-        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 1.5, 16, 3, 20, 6],
-        "line-opacity": 1.0,
-      },
-    });
+  function lineColor(pairType: string | null): string {
+    return (pairType != null ? LINE_COLORS[pairType] : null) ?? "#2ca02c";
   }
 
   async function refreshLines() {
     if (!map || lines == null || queryLines == null) {
       return;
     }
-    ensureLinesLayer();
-    const source = map.getSource(LINES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
-    if (!source) {
-      return;
-    }
     // Below the zoom gate the lines are sub-pixel — clear and skip the query.
-    if (map.getZoom() < (lines.minZoom ?? 12)) {
-      source.setData(EMPTY_FC);
+    if (map.getZoom() < (lines.minZoom ?? LINES_MIN_ZOOM_DEFAULT)) {
+      if (matchLineRows.length > 0) {
+        matchLineRows = [];
+      }
       return;
     }
     // Lines are <=400 m; expand the viewport bbox by ~1 km so lines whose
@@ -1087,24 +1057,16 @@
       return;
     }
     // Drop stale results from a superseded viewport.
-    if (seq !== linesRequestSeq || !map) {
+    if (seq !== linesRequestSeq) {
       return;
     }
-    const stillThere = map.getSource(LINES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
-    stillThere?.setData({
-      type: "FeatureCollection",
-      features: rows.map((r) => ({
-        type: "Feature" as const,
-        geometry: {
-          type: "LineString" as const,
-          coordinates: [
-            [r.x1, r.y1],
-            [r.x2, r.y2],
-          ],
-        },
-        properties: { pairType: r.pairType },
-      })),
-    });
+    matchLineRows = rows.map((r) => ({
+      x1: r.x1,
+      y1: r.y1,
+      x2: r.x2,
+      y2: r.y2,
+      color: lineColor(r.pairType),
+    }));
   }
 
   function scheduleLinesRefresh() {
@@ -1117,41 +1079,19 @@
     }, 150);
   }
 
-  // Add (or re-add) the lines source+layer once the style is ready, then
-  // populate it. `styledata` fires repeatedly *during* style load with
-  // isStyleLoaded() still false, so we trigger on the one-shot `load` event
-  // (and re-add after a setStyle via `styledata`, which by then reports
-  // loaded). `ensureLinesLayer` is idempotent and self-guards on isStyleLoaded.
-  $effect(() => {
-    if (!map || lines == null) {
-      return;
-    }
-    const onReady = () => {
-      ensureLinesLayer();
-      scheduleLinesRefresh();
-    };
-    if (map.isStyleLoaded()) {
-      onReady();
-    } else {
-      map.once("load", onReady);
-    }
-    map.on("styledata", onReady);
-    // Expose a manual refresh for E2E testing (mirrors the other
-    // __geospatialAtlas* test globals). No-op for normal usage.
-    if (typeof window !== "undefined") {
-      (window as any).__geospatialAtlasRefreshLines = () => refreshLines();
-    }
-    return () => {
-      map?.off("styledata", onReady);
-    };
-  });
-
-  // Refresh the viewport-culled lines whenever the camera moves. Reading
-  // `resolvedViewportState` registers the dependency.
+  // Re-query the viewport-culled lines whenever the camera moves. Reading
+  // `resolvedViewportState` registers the dependency; the SVG below re-projects
+  // the cached rows reactively via `pointLocation` on every change.
   $effect(() => {
     void resolvedViewportState;
     if (map && lines != null) {
       scheduleLinesRefresh();
+    }
+    // Expose a manual refresh for E2E testing (mirrors the other
+    // __geospatialAtlas* test globals). No-op for normal usage.
+    if (typeof window !== "undefined") {
+      (window as any).__geospatialAtlasRefreshLines = () => refreshLines();
+      (window as any).__geospatialAtlasQueryLines = (bbox: any) => queryLines?.(bbox);
     }
   });
 
@@ -1592,6 +1532,19 @@
       hover: onHover,
     }}
   >
+    <!-- Match Lines (matcher-eval overlay). Projected with the same
+         `pointLocation` as the points, so they stay aligned with both the
+         points and the camera-synced basemap. -->
+    {#if lines != null && matchLineRows.length > 0}
+      {#each matchLineRows as ln}
+        {@const p1 = pointLocation(ln.x1, ln.y1)}
+        {@const p2 = pointLocation(ln.x2, ln.y2)}
+        {#if isFinite(p1.x) && isFinite(p1.y) && isFinite(p2.x) && isFinite(p2.y)}
+          <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke={ln.color} stroke-width={2.5} stroke-linecap="round" />
+        {/if}
+      {/each}
+    {/if}
+
     <!-- Tooltip point -->
     {#if tooltip != null && renderer != null}
       {@const { x, y } = pointLocation(tooltip.x, tooltip.y)}

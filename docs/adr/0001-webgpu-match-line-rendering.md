@@ -1,10 +1,19 @@
-# Render Match Lines as a viewport-culled MapLibre line layer
+# Render Match Lines as a viewport-culled SVG overlay
 
-Match Lines are drawn as a native MapLibre GL GeoJSON line layer on the existing
-basemap map instance, fed by a viewport-bounded SQL query against the Lines table.
-They are **not** rendered in the WebGPU point renderer, and not via a separate engine
-(deck.gl). This supersedes the earlier decision to extend the WebGPU renderer with a
-line pass.
+Match Lines are drawn as `<line>` elements in the embedding view's existing SVG overlay,
+projected with the **same** `pointLocation` function the renderer uses for points (and
+tooltips/labels), fed by a viewport-bounded SQL query against the Lines table. They are
+**not** rendered in the WebGPU point renderer, not via a separate engine (deck.gl), and
+not via a MapLibre GeoJSON layer.
+
+> **Why not a MapLibre GeoJSON layer** (the previous plan): GeoJSON source tiling is
+> broken in this app's Vite/ESM bundle — vector-tile basemap layers render, but a
+> runtime-added GeoJSON source reports loaded yet produces zero features
+> (`querySourceFeatures` = 0, nothing paints). The same maplibre build works standalone
+> (UMD), so it is a bundling issue, not a maplibre bug. Rather than chase the worker
+> bundling, lines are drawn as SVG. Because they are viewport-culled (few on screen) and
+> short (≤400 m), SVG is more than fast enough, and reusing `pointLocation` guarantees
+> they stay glued to the points and the camera-synced basemap.
 
 ## Why this changed
 
@@ -47,11 +56,13 @@ if dense-metro viewports at z12 prove to stutter.
 
 ## Consequences
 
-- Lines work wherever MapLibre runs (no WebGPU-only limitation; the WebGL2 fallback path
-  is unaffected).
-- The Lines table is loaded into DuckDB alongside Points; the layer is refreshed from a
-  viewport-bounded query on `moveend`.
-- Per-viewport line count is the scaling variable to watch; if a viewport ever holds
-  more than ~tens of thousands of lines, revisit deck.gl.
-- v1: Match Lines redraw on score filter (and on viewport/zoom change); spatial and
-  categorical cross-filter of lines beyond the viewport bbox is deferred.
+- Lines render as DOM SVG — no GPU/worker/GeoJSON dependency, works wherever the rest of
+  the overlay does.
+- The Lines table is loaded into DuckDB alongside Points; the cached row set is refreshed
+  from a viewport-bounded query (debounced) on viewport change, and re-projected each
+  frame via `pointLocation` so the lines track pan/zoom.
+- Per-viewport line count is the scaling variable to watch. SVG comfortably handles up to
+  a few thousand `<line>` elements; if a viewport ever holds more, switch to a `<canvas>`
+  overlay (same projection, same data path) or revisit a GPU layer.
+- v1: Match Lines redraw on viewport/zoom change; score and other cross-filters are
+  deferred.
