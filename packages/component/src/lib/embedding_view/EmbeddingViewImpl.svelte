@@ -104,7 +104,7 @@
       densityAlpha,
       contoursAlpha: densityAlpha,
       pointSize,
-      pointAlpha: 0.7,
+      pointAlpha: 1.0,
       pointsAlpha: pointsAlpha,
       densityBandwidth: 20,
     };
@@ -1047,8 +1047,10 @@
       layout: { "line-cap": "round", "line-join": "round" },
       paint: {
         "line-color": linesColorExpression(),
-        "line-width": 1.5,
-        "line-opacity": 0.7,
+        // Match Lines are short (median ~13 m); keep them wide and fully
+        // opaque, and grow with zoom so they read between their endpoint dots.
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 1.5, 16, 3, 20, 6],
+        "line-opacity": 1.0,
       },
     });
   }
@@ -1115,31 +1117,42 @@
     }, 150);
   }
 
-  // Re-add the layer whenever the style (re)loads, and refresh on every
-  // viewport change. Reading `resolvedViewportState` registers the dependency
-  // so this re-runs as the camera moves.
+  // Add (or re-add) the lines source+layer once the style is ready, then
+  // populate it. `styledata` fires repeatedly *during* style load with
+  // isStyleLoaded() still false, so we trigger on the one-shot `load` event
+  // (and re-add after a setStyle via `styledata`, which by then reports
+  // loaded). `ensureLinesLayer` is idempotent and self-guards on isStyleLoaded.
   $effect(() => {
-    void resolvedViewportState;
     if (!map || lines == null) {
       return;
     }
-    const onStyle = () => {
+    const onReady = () => {
       ensureLinesLayer();
       scheduleLinesRefresh();
     };
-    map.on("styledata", onStyle);
     if (map.isStyleLoaded()) {
-      onStyle();
+      onReady();
+    } else {
+      map.once("load", onReady);
     }
-    scheduleLinesRefresh();
+    map.on("styledata", onReady);
     // Expose a manual refresh for E2E testing (mirrors the other
     // __geospatialAtlas* test globals). No-op for normal usage.
     if (typeof window !== "undefined") {
       (window as any).__geospatialAtlasRefreshLines = () => refreshLines();
     }
     return () => {
-      map?.off("styledata", onStyle);
+      map?.off("styledata", onReady);
     };
+  });
+
+  // Refresh the viewport-culled lines whenever the camera moves. Reading
+  // `resolvedViewportState` registers the dependency.
+  $effect(() => {
+    void resolvedViewportState;
+    if (map && lines != null) {
+      scheduleLinesRefresh();
+    }
   });
 
   $effect(() => {
