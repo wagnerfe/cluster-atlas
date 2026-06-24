@@ -59,6 +59,13 @@
   const minDownsampleMaxPointsInteractive = 0;
   const defaultMapStyle = "https://tiles.openfreemap.org/styles/liberty";
 
+  // Match-Lines (matcher-eval) pair types, colors mirror the renderer.
+  const MATCH_LINE_TYPES = [
+    { key: "candidate->baseline", label: "Candidate → Baseline", color: "#2ca02c" },
+    { key: "candidate->candidate", label: "Candidate → Candidate", color: "#ff7f0e" },
+    { key: "baseline->baseline", label: "Baseline → Baseline", color: "#9467bd" },
+  ];
+
   let {
     context,
     width,
@@ -99,6 +106,11 @@
   $effect(() => {
     mapStyleInput = spec.mapStyle ?? defaultMapStyle;
   });
+
+  // Match-Lines visibility (matcher-eval). Master toggle + per-pair-type.
+  let matchLinesEnabled = $state(true);
+  let visibleMatchLineTypes = $state<string[]>(MATCH_LINE_TYPES.map((t) => t.key));
+  let effectiveVisibleLineTypes = $derived(matchLinesEnabled ? visibleMatchLineTypes : []);
 
   // Update the category mapping and legend.
   $effect.pre(() => {
@@ -239,6 +251,7 @@
     category={categoryLegend?.indexColumn}
     categoryColors={categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor]}
     lines={spec.data.lines}
+    linesVisibleTypes={spec.data.lines != null ? effectiveVisibleLineTypes : null}
     config={{
       colorScheme: $colorScheme,
       ...context.embeddingViewConfig,
@@ -342,6 +355,29 @@
                 onClick={() => onSpecChange({ mapStyle: mapStyleInput })}
               />
             </div>
+          {/if}
+          {#if spec.data.lines != null}
+            <div class="flex items-center justify-between">
+              <div class="text-slate-500 dark:text-slate-400 select-none">Match Lines</div>
+              <Switch label="Show" value={matchLinesEnabled} onChange={(v) => (matchLinesEnabled = v)} />
+            </div>
+            {#each MATCH_LINE_TYPES as t}
+              <div class="flex items-center justify-between" class:opacity-50={!matchLinesEnabled}>
+                <div class="flex items-center gap-2">
+                  <span style="display:inline-block;width:14px;height:3px;border-radius:2px;background:{t.color}"
+                  ></span>
+                  <span class="select-none text-sm">{t.label}</span>
+                </div>
+                <Switch
+                  value={visibleMatchLineTypes.includes(t.key)}
+                  onChange={(v) => {
+                    visibleMatchLineTypes = v
+                      ? [...visibleMatchLineTypes, t.key]
+                      : visibleMatchLineTypes.filter((x) => x !== t.key);
+                  }}
+                />
+              </div>
+            {/each}
           {/if}
           <div class="text-slate-500 dark:text-slate-400 select-none">Display Mode</div>
           <div class="flex gap-2 items-center">

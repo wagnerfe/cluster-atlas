@@ -198,9 +198,12 @@ export interface EmbeddingViewMosaicProps {
   cache?: Cache | null;
 
   /** Optional Match-Lines overlay (matcher-eval view). When set, a
-   *  viewport-culled MapLibre line layer is drawn between the endpoints in
+   *  viewport-culled SVG overlay is drawn between the endpoints in
    *  `lines.table`, above `lines.minZoom`. */
   lines?: MatchLinesConfig | null;
+
+  /** Which match-line pair types to show. `null` = all; `[]` = none. */
+  linesVisibleTypes?: string[] | null;
 }
 
 export class EmbeddingViewMosaic {

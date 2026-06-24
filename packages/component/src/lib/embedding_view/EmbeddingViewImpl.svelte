@@ -52,6 +52,8 @@
           yMax: number;
         }) => Promise<{ x1: number; y1: number; x2: number; y2: number; pairType: string | null }[]>)
       | null;
+    /** Match-line pair types to show. `null`/absent = all; `[]` = none. */
+    linesVisibleTypes?: string[] | null;
   }
 
   interface Cluster {
@@ -190,6 +192,7 @@
     cache = null,
     lines = null,
     queryLines = null,
+    linesVisibleTypes = null,
   }: Props<Selection> = $props();
 
   let showClusterLabels = true;
@@ -1020,13 +1023,23 @@
   };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let linesRequestSeq = 0;
-  // The current viewport's Match Lines as raw lon/lat endpoints + color.
+  // The current viewport's Match Lines as raw lon/lat endpoints + pair type.
   // `pointLocation` projects lat internally, so we pass raw coords straight in.
-  let matchLineRows = $state.raw<{ x1: number; y1: number; x2: number; y2: number; color: string }[]>([]);
+  let matchLineRows = $state.raw<
+    { x1: number; y1: number; x2: number; y2: number; pairType: string | null; color: string }[]
+  >([]);
 
   function lineColor(pairType: string | null): string {
     return (pairType != null ? LINE_COLORS[pairType] : null) ?? "#2ca02c";
   }
+
+  // Pair types currently toggled on (from the UI). `null` means "all visible".
+  let visibleLineSet = $derived(linesVisibleTypes != null ? new Set(linesVisibleTypes) : null);
+  let renderedMatchLines = $derived(
+    visibleLineSet == null
+      ? matchLineRows
+      : matchLineRows.filter((r) => r.pairType == null || visibleLineSet.has(r.pairType)),
+  );
 
   async function refreshLines() {
     if (!map || lines == null || queryLines == null) {
@@ -1065,6 +1078,7 @@
       y1: r.y1,
       x2: r.x2,
       y2: r.y2,
+      pairType: r.pairType,
       color: lineColor(r.pairType),
     }));
   }
@@ -1535,8 +1549,8 @@
     <!-- Match Lines (matcher-eval overlay). Projected with the same
          `pointLocation` as the points, so they stay aligned with both the
          points and the camera-synced basemap. -->
-    {#if lines != null && matchLineRows.length > 0}
-      {#each matchLineRows as ln}
+    {#if lines != null && renderedMatchLines.length > 0}
+      {#each renderedMatchLines as ln}
         {@const p1 = pointLocation(ln.x1, ln.y1)}
         {@const p2 = pointLocation(ln.x2, ln.y2)}
         {#if isFinite(p1.x) && isFinite(p1.y) && isFinite(p2.x) && isFinite(p2.y)}

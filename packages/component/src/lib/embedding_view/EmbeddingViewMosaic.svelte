@@ -68,6 +68,7 @@
     onRangeSelection = null,
     cache = null,
     lines = null,
+    linesVisibleTypes = null,
   }: EmbeddingViewMosaicProps = $props();
 
   // Maximum Match Lines fetched per viewport refresh. Lines are <=400 m, so a
@@ -849,4 +850,5 @@
   cache={cache}
   lines={lines}
   queryLines={lines != null ? queryLines : null}
+  linesVisibleTypes={linesVisibleTypes}
 />
