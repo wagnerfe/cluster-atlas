@@ -4,12 +4,16 @@
 
 This is the *local* build step described in
 ``docs/adr/0002-decoupled-expected-format-contract.md``: it reads the raw
-``candidates/``, ``baseline/`` and ``matches/`` folders produced by a matcher run
-and writes two pre-built datasets the viewer can consume directly:
+``candidates/``, ``baseline/``, ``matches/`` and ``blocking/`` folders produced by a
+matcher run and writes two pre-built datasets the viewer can consume directly:
 
 - **points.parquet** — candidates ∪ baselines, one row per POI, tagged with
-  ``point_class`` and carrying every source column verbatim, plus the Match Result
-  fields on matched-candidate rows.
+  ``point_class`` and carrying every source column verbatim. Two candidate-only flags
+  are added (null on baseline rows): ``history_match`` (1 if the candidate's
+  ``base_ids`` is non-null, else 0) and ``blocked`` (1 if the candidate never entered
+  a ``blocking`` pair — blocked out before matching — else 0). A ``cluster_size`` flag
+  (on both candidates and baselines, null when unmatched) gives the number of
+  ``match`` rows sharing the record's ``base_id`` cluster.
 - **lines.parquet** — one Match Line per ``match_type='match'`` row, with both
   type-aware endpoints, the pair identity, ``composite_score`` and ``match_pair_type``.
 
@@ -38,9 +42,10 @@ logger = logging.getLogger("embedding-atlas")
 CANDIDATES_DIR = "candidates"
 BASELINE_DIR = "baseline"
 MATCHES_DIR = "matches"
+BLOCKING_DIR = "blocking"
 
 # Version the build logic so a code change invalidates stale cached outputs.
-BUILD_VERSION = 1
+BUILD_VERSION = 3
 
 
 @dataclass
@@ -90,24 +95,29 @@ def _abs_glob(glob: str) -> list[Path]:
     return [p] if p.exists() else []
 
 
-def _resolve_run_dir(run_dir: Path) -> tuple[Path, Path, Path]:
-    """Locate the candidates/baseline/matches inputs inside a run directory."""
+def _resolve_run_dir(run_dir: Path) -> tuple[Path, Path, Path, Path]:
+    """Locate the candidates/baseline/matches/blocking inputs in a run directory."""
     candidates = run_dir / CANDIDATES_DIR
     baseline = run_dir / BASELINE_DIR
     matches = run_dir / MATCHES_DIR
-    missing = [d.name for d in (candidates, baseline, matches) if not d.exists()]
+    blocking = run_dir / BLOCKING_DIR
+    missing = [
+        d.name for d in (candidates, baseline, matches, blocking) if not d.exists()
+    ]
     if missing:
         raise FileNotFoundError(
             f"Run directory {run_dir} is missing expected subfolder(s): "
             f"{', '.join(missing)}. Expected {CANDIDATES_DIR}/, {BASELINE_DIR}/, "
-            f"{MATCHES_DIR}/."
+            f"{MATCHES_DIR}/, {BLOCKING_DIR}/."
         )
-    return candidates, baseline, matches
+    return candidates, baseline, matches, blocking
 
 
-def _default_out_dir(cand_glob: str, base_glob: str, match_glob: str) -> Path:
+def _default_out_dir(
+    cand_glob: str, base_glob: str, match_glob: str, block_glob: str
+) -> Path:
     """A cache directory keyed by the resolved input files (path/size/mtime)."""
-    files = _list_input_files(cand_glob, base_glob, match_glob)
+    files = _list_input_files(cand_glob, base_glob, match_glob, block_glob)
     key = sha256_hexdigest([BUILD_VERSION, files], scope="match_eval")
     return user_cache_path("embedding_atlas") / "match_eval" / key
 
@@ -130,13 +140,14 @@ def build_match_eval(
         A :class:`MatchEvalBuild` with output paths and stats.
     """
     run_dir = Path(run_dir).expanduser().resolve()
-    candidates, baseline, matches = _resolve_run_dir(run_dir)
+    candidates, baseline, matches, blocking = _resolve_run_dir(run_dir)
     cand_glob = _glob_for(candidates)
     base_glob = _glob_for(baseline)
     match_glob = _glob_for(matches)
+    block_glob = _glob_for(blocking)
 
     if out_dir is None:
-        out_dir = _default_out_dir(cand_glob, base_glob, match_glob)
+        out_dir = _default_out_dir(cand_glob, base_glob, match_glob, block_glob)
     out_dir = Path(out_dir).expanduser().resolve()
     points_path = out_dir / "points.parquet"
     lines_path = out_dir / "lines.parquet"
@@ -152,7 +163,7 @@ def build_match_eval(
     con = duckdb.connect()
     try:
         result = _run_build(
-            con, cand_glob, base_glob, match_glob, points_path, lines_path
+            con, cand_glob, base_glob, match_glob, block_glob, points_path, lines_path
         )
     finally:
         con.close()
@@ -167,6 +178,7 @@ def _run_build(
     cand_glob: str,
     base_glob: str,
     match_glob: str,
+    block_glob: str,
     points_path: Path,
     lines_path: Path,
 ) -> MatchEvalBuild:
@@ -174,6 +186,7 @@ def _run_build(
         "cand": cand_glob,
         "base": base_glob,
         "match": match_glob,
+        "block": block_glob,
     }
 
     n_candidates = con.execute(
@@ -206,19 +219,54 @@ def _run_build(
             UNION
             SELECT base_id AS pid FROM m WHERE base_record_type='baseline'
         ),
+        -- Candidate ids that took part in any blocking pair (either side).
+        blocked_cand AS (
+            SELECT id AS pid FROM read_parquet($block) WHERE record_type='candidate'
+            UNION
+            SELECT base_id AS pid FROM read_parquet($block)
+                WHERE base_record_type='candidate'
+        ),
+        -- Cluster size = number of match rows sharing a base_id; assigned to every
+        -- member of that cluster (both the base_id record and each id record),
+        -- type-aware via record_type / base_record_type. Unmatched points get null.
+        csize AS (SELECT base_id, count(*) AS n FROM m GROUP BY base_id),
+        members AS (
+            SELECT id AS pid, record_type AS rt, base_id FROM m
+            UNION ALL
+            SELECT base_id AS pid, base_record_type AS rt, base_id FROM m
+        ),
+        pid_size AS (
+            SELECT pid, rt, max(n) AS cluster_size
+            FROM members JOIN csize USING (base_id)
+            GROUP BY pid, rt
+        ),
         cand AS (
             SELECT c.*, 'candidate' AS origin,
                 CASE WHEN c.id IN (SELECT pid FROM matched_cand)
                      THEN 'matched_candidate' ELSE 'unmatched_candidate' END
-                AS point_class
+                AS point_class,
+                -- 1 if the candidate carries a historical base_ids link, else 0.
+                CASE WHEN c.base_ids IS NOT NULL THEN 1 ELSE 0 END
+                AS history_match,
+                -- 1 if the candidate never entered a blocking pair (blocked out
+                -- before matching), else 0.
+                CASE WHEN c.id IN (SELECT pid FROM blocked_cand) THEN 0 ELSE 1 END
+                AS blocked,
+                cs.cluster_size AS cluster_size
             FROM read_parquet($cand) c
+            LEFT JOIN pid_size cs ON cs.pid = c.id AND cs.rt = 'candidate'
         ),
         base AS (
             SELECT b.*, 'baseline' AS origin,
                 CASE WHEN b.id IN (SELECT pid FROM matched_base)
                      THEN 'matched_baseline' ELSE 'unmatched_baseline' END
-                AS point_class
+                AS point_class,
+                -- history_match / blocked are candidate-only; null on baseline rows.
+                CAST(NULL AS INTEGER) AS history_match,
+                CAST(NULL AS INTEGER) AS blocked,
+                cs.cluster_size AS cluster_size
             FROM read_parquet($base) b
+            LEFT JOIN pid_size cs ON cs.pid = b.id AND cs.rt = 'baseline'
         )
         -- One row per POI: own columns verbatim + origin + point_class. No
         -- per-match enrichment — a POI may have several matches, so all match
@@ -274,7 +322,7 @@ def _run_build(
         LEFT JOIN cand c2 ON m.base_record_type='candidate' AND m.base_id = c2.id
         LEFT JOIN base b2 ON m.base_record_type='baseline'  AND m.base_id = b2.id
         """,
-        p,
+        {"cand": cand_glob, "base": base_glob, "match": match_glob},
     )
 
     con.execute(

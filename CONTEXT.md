@@ -64,13 +64,24 @@ partitioned, e.g. `type=place/…`); the loader globs `**/*.parquet`.
   POI may participate in several matches, so all match detail lives in the Lines dataset
   (joinable by `id`/`base_id`). The union is schema-aligned: columns absent on one side
   are null-filled. A point is displayed as-is; the line carries the match information.
+  Two **candidate-only derived flags** are added (null on baseline rows):
+  `history_match` (1 if the candidate's `base_ids` is non-null, else 0 — a pre-existing
+  historical link) and `blocked` (1 if the candidate never appears in any `blocking`
+  pair, i.e. was blocked out before matching, else 0). `blocked` derives from the
+  `blocking/` folder, not from `matches` — every candidate has a `matches` row
+  (`match`/`nomatch`), so absence-from-matches would never flag anything. A
+  `cluster_size` field (on **both** candidates and baselines, null when unmatched)
+  carries the number of `match` rows sharing the record's `base_id` cluster, assigned to
+  every member of that cluster (the `base_id` record and each `id` record, type-aware);
+  a record in several clusters takes the max.
 - **Lines dataset**: one Match Line per `match_type='match'` pair. Columns:
   `lon1, lat1, lon2, lat2` (the two type-aware endpoints), `id, base_id` (the pair),
   `composite_score` (informational), `match_pair_type` (drives line color).
 
 Produced two ways:
 - **Local sample**: the `match-eval` CLI builds Points + Lines from the raw
-  `candidates/`, `baseline/`, `matches/` folders (no line data present yet) and writes
+  `candidates/`, `baseline/`, `matches/`, `blocking/` folders (no line data present yet)
+  and writes
   them to a local cache dir (keyed by run path), rebuilt only when inputs are newer.
 - **Prod / S3**: the matching run itself emits Points + Lines in Expected Format as
   `points/` and `lines/` folders inside the output dir, alongside the raw inputs.
