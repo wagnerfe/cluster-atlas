@@ -64,5 +64,11 @@ if dense-metro viewports at z12 prove to stutter.
 - Per-viewport line count is the scaling variable to watch. SVG comfortably handles up to
   a few thousand `<line>` elements; if a viewport ever holds more, switch to a `<canvas>`
   overlay (same projection, same data path) or revisit a GPU layer.
-- v1: Match Lines redraw on viewport/zoom change; score and other cross-filters are
-  deferred.
+- Match Lines redraw on viewport/zoom change.
+- **Toggle**: a master "Match Lines" switch plus per-pair-type switches in the embedding
+  Options popup control which lines show (`linesVisibleTypes`).
+- **Cross-filter**: the lines are fetched by a Mosaic client bound to the active
+  selection, so they follow cross-filtering — a line is kept only when its `id` endpoint
+  survives the selection, via `id IN (SELECT id FROM <points> WHERE <predicate>)`. The
+  client re-queries on selection change; the view pushes viewport bboxes that trigger
+  `requestQuery()`.

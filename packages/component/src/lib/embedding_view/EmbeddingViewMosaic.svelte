@@ -71,22 +71,24 @@
     linesVisibleTypes = null,
   }: EmbeddingViewMosaicProps = $props();
 
-  // Maximum Match Lines fetched per viewport refresh. Lines are <=400 m, so a
-  // viewport at the gating zoom holds a bounded number; the cap guards against
-  // a pathologically dense metro. Hitting it is logged, not silent (ADR-0001).
+  // ---- Match Lines (matcher-eval) data client ----------------------------
+  // A Mosaic client that fetches the viewport's Match Lines and, when a
+  // cross-filter selection is active, keeps only lines whose `id` endpoint
+  // survives it (via an `id IN (SELECT ... FROM points WHERE <selection>)`
+  // subquery). Being a real client, it re-queries automatically when the
+  // selection changes; the embedding view pushes viewport bboxes which trigger
+  // `requestQuery()`. Lines are <=400 m, so a gated viewport holds a bounded
+  // number; the cap guards against a pathologically dense metro.
   const LINES_VIEWPORT_CAP = 50000;
+  type LineRow = { x1: number; y1: number; x2: number; y2: number; pairType: string | null };
 
-  /** Fetch Match Lines whose first endpoint falls within `bbox` (lon/lat,
-   *  already expanded by the caller to catch lines straddling the edge).
-   *  Returns plain endpoint rows for the MapLibre line layer. */
-  async function queryLines(bbox: {
-    xMin: number;
-    xMax: number;
-    yMin: number;
-    yMax: number;
-  }): Promise<{ x1: number; y1: number; x2: number; y2: number; pairType: string | null }[]> {
-    if (lines == null) {
-      return [];
+  let lineRows = $state.raw<LineRow[]>([]);
+  let linesBbox: { xMin: number; xMax: number; yMin: number; yMax: number } | null = null;
+  let linesClient: MosaicClient | null = null;
+
+  function buildLinesQuery(predicate: any): any {
+    if (lines == null || linesBbox == null) {
+      return null;
     }
     let select: Record<string, any> = {
       x1: SQL.column(lines.x1),
@@ -97,24 +99,32 @@
     if (lines.pairType != null) {
       select.pairType = SQL.column(lines.pairType);
     }
-    let query = SQL.Query.from(lines.table)
+    let conditions: any[] = [
+      SQL.isBetween(SQL.column(lines.x1), [linesBbox.xMin, linesBbox.xMax]),
+      SQL.isBetween(SQL.column(lines.y1), [linesBbox.yMin, linesBbox.yMax]),
+    ];
+    // Cross-filter: keep lines whose `id` endpoint is among the points that
+    // pass the active selection. The predicate is over the points table's
+    // columns, so it is evaluated inside the subquery against `table`.
+    if (predicate != null && String(predicate).trim().length > 0) {
+      let pointsWithId = SQL.Query.from(table)
+        .select({ id: SQL.column("id") })
+        .where(predicate);
+      conditions.push(SQL.sql`${SQL.column("id")} IN (${pointsWithId})`);
+    }
+    return SQL.Query.from(lines.table)
       .select(select)
-      .where(
-        SQL.and(
-          SQL.isBetween(SQL.column(lines.x1), [bbox.xMin, bbox.xMax]),
-          SQL.isBetween(SQL.column(lines.y1), [bbox.yMin, bbox.yMax]),
-        ),
-      )
+      .where(SQL.and(...conditions))
       .limit(LINES_VIEWPORT_CAP);
-    // Arrow result: read columns and zip into rows (matches the column-wise
-    // ``getChild(...).toArray()`` access used elsewhere in this file).
-    let result: any = await coordinator.query(query);
-    let x1 = result.getChild("x1").toArray();
-    let y1 = result.getChild("y1").toArray();
-    let x2 = result.getChild("x2").toArray();
-    let y2 = result.getChild("y2").toArray();
-    let pairTypeVec = lines.pairType != null ? result.getChild("pairType") : null;
-    let out: { x1: number; y1: number; x2: number; y2: number; pairType: string | null }[] = [];
+  }
+
+  function extractLineRows(data: any): LineRow[] {
+    let x1 = data.getChild("x1").toArray();
+    let y1 = data.getChild("y1").toArray();
+    let x2 = data.getChild("x2").toArray();
+    let y2 = data.getChild("y2").toArray();
+    let pairTypeVec = lines?.pairType != null ? data.getChild("pairType") : null;
+    let out: LineRow[] = [];
     for (let i = 0; i < x1.length; i++) {
       out.push({
         x1: x1[i],
@@ -128,6 +138,41 @@
       console.warn(`Match Lines: viewport hit the ${LINES_VIEWPORT_CAP}-line cap; some lines not drawn.`);
     }
     return out;
+  }
+
+  // Connect/disconnect the lines client to the active selection.
+  $effect(() => {
+    if (lines == null) {
+      return;
+    }
+    let client = makeClient({
+      coordinator,
+      selection: filter ?? undefined,
+      query: (predicate) => buildLinesQuery(predicate),
+      queryResult: (data: any) => {
+        lineRows = extractLineRows(data);
+      },
+    });
+    linesClient = client;
+    return () => {
+      coordinator.disconnect(client);
+      if (linesClient === client) {
+        linesClient = null;
+      }
+    };
+  });
+
+  // Called by the embedding view when the viewport changes (null = below the
+  // zoom gate). Stores the bbox and re-runs the client query.
+  function setLinesViewport(bbox: { xMin: number; xMax: number; yMin: number; yMax: number } | null) {
+    linesBbox = bbox;
+    if (bbox == null) {
+      if (lineRows.length > 0) {
+        lineRows = [];
+      }
+      return;
+    }
+    linesClient?.requestQuery();
   }
 
   // Stable empty sentinel. Reusing one identity across "no data" updates
@@ -849,6 +894,7 @@
   }}
   cache={cache}
   lines={lines}
-  queryLines={lines != null ? queryLines : null}
+  lineRows={lineRows}
+  onLinesViewport={setLinesViewport}
   linesVisibleTypes={linesVisibleTypes}
 />

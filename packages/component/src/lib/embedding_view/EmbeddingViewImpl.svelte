@@ -42,16 +42,12 @@
     cache: Cache | null;
     /** Optional Match-Lines overlay config (matcher-eval view). */
     lines?: MatchLinesConfig | null;
-    /** Fetches the Match Lines whose first endpoint lies in a lon/lat bbox.
-     *  Provided by the Mosaic wrapper, which owns the coordinator. */
-    queryLines?:
-      | ((bbox: {
-          xMin: number;
-          xMax: number;
-          yMin: number;
-          yMax: number;
-        }) => Promise<{ x1: number; y1: number; x2: number; y2: number; pairType: string | null }[]>)
-      | null;
+    /** The current viewport's Match Lines (raw lon/lat endpoints + pair type),
+     *  supplied by the Mosaic wrapper which owns the data client. */
+    lineRows?: { x1: number; y1: number; x2: number; y2: number; pairType: string | null }[] | null;
+    /** Notifies the wrapper of the current lon/lat viewport bbox (or null when
+     *  below the zoom gate) so it can (re)query the lines. */
+    onLinesViewport?: ((bbox: { xMin: number; xMax: number; yMin: number; yMax: number } | null) => void) | null;
     /** Match-line pair types to show. `null`/absent = all; `[]` = none. */
     linesVisibleTypes?: string[] | null;
   }
@@ -191,7 +187,8 @@
     onRangeSelection = null,
     cache = null,
     lines = null,
-    queryLines = null,
+    lineRows = null,
+    onLinesViewport = null,
     linesVisibleTypes = null,
   }: Props<Selection> = $props();
 
@@ -1022,12 +1019,6 @@
     "baseline->baseline": "#9467bd",
   };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let linesRequestSeq = 0;
-  // The current viewport's Match Lines as raw lon/lat endpoints + pair type.
-  // `pointLocation` projects lat internally, so we pass raw coords straight in.
-  let matchLineRows = $state.raw<
-    { x1: number; y1: number; x2: number; y2: number; pairType: string | null; color: string }[]
-  >([]);
 
   function lineColor(pairType: string | null): string {
     return (pairType != null ? LINE_COLORS[pairType] : null) ?? "#2ca02c";
@@ -1035,77 +1026,55 @@
 
   // Pair types currently toggled on (from the UI). `null` means "all visible".
   let visibleLineSet = $derived(linesVisibleTypes != null ? new Set(linesVisibleTypes) : null);
+  // Rows come from the Mosaic wrapper (which owns the data client); filter by
+  // the visible pair types and attach a color. `pointLocation` projects lat
+  // internally, so the raw lon/lat endpoints go straight in.
   let renderedMatchLines = $derived(
-    visibleLineSet == null
-      ? matchLineRows
-      : matchLineRows.filter((r) => r.pairType == null || visibleLineSet.has(r.pairType)),
+    (lineRows ?? [])
+      .filter((r) => visibleLineSet == null || r.pairType == null || visibleLineSet.has(r.pairType))
+      .map((r) => ({ ...r, color: lineColor(r.pairType) })),
   );
 
-  async function refreshLines() {
-    if (!map || lines == null || queryLines == null) {
+  // Push the current viewport bbox to the wrapper so it can (re)query the
+  // lines. Below the zoom gate we send null (sub-pixel — nothing to draw).
+  // Debounced; reading `resolvedViewportState` registers the dependency, and
+  // the SVG below re-projects the returned rows reactively via `pointLocation`.
+  function pushLinesViewport() {
+    if (!map || lines == null || onLinesViewport == null) {
       return;
     }
-    // Below the zoom gate the lines are sub-pixel — clear and skip the query.
     if (map.getZoom() < (lines.minZoom ?? LINES_MIN_ZOOM_DEFAULT)) {
-      if (matchLineRows.length > 0) {
-        matchLineRows = [];
-      }
+      onLinesViewport(null);
       return;
     }
-    // Lines are <=400 m; expand the viewport bbox by ~1 km so lines whose
-    // first endpoint sits just off-screen are still drawn.
+    // Lines are <=400 m; expand the bbox by ~1 km so lines whose first endpoint
+    // sits just off-screen are still drawn.
     const b = map.getBounds();
     const margin = 0.01;
-    const seq = ++linesRequestSeq;
-    let rows: { x1: number; y1: number; x2: number; y2: number; pairType: string | null }[];
-    try {
-      rows = await queryLines({
-        xMin: b.getWest() - margin,
-        xMax: b.getEast() + margin,
-        yMin: b.getSouth() - margin,
-        yMax: b.getNorth() + margin,
-      });
-    } catch (e) {
-      console.warn("Match Lines: viewport query failed", e);
-      return;
-    }
-    // Drop stale results from a superseded viewport.
-    if (seq !== linesRequestSeq) {
-      return;
-    }
-    matchLineRows = rows.map((r) => ({
-      x1: r.x1,
-      y1: r.y1,
-      x2: r.x2,
-      y2: r.y2,
-      pairType: r.pairType,
-      color: lineColor(r.pairType),
-    }));
+    onLinesViewport({
+      xMin: b.getWest() - margin,
+      xMax: b.getEast() + margin,
+      yMin: b.getSouth() - margin,
+      yMax: b.getNorth() + margin,
+    });
   }
 
-  function scheduleLinesRefresh() {
+  $effect(() => {
+    void resolvedViewportState;
+    if (!(map && lines != null)) {
+      return;
+    }
     if (linesRefreshTimer != null) {
       clearTimeout(linesRefreshTimer);
     }
     linesRefreshTimer = setTimeout(() => {
       linesRefreshTimer = null;
-      refreshLines();
+      pushLinesViewport();
     }, 150);
-  }
-
-  // Re-query the viewport-culled lines whenever the camera moves. Reading
-  // `resolvedViewportState` registers the dependency; the SVG below re-projects
-  // the cached rows reactively via `pointLocation` on every change.
-  $effect(() => {
-    void resolvedViewportState;
-    if (map && lines != null) {
-      scheduleLinesRefresh();
-    }
     // Expose a manual refresh for E2E testing (mirrors the other
     // __geospatialAtlas* test globals). No-op for normal usage.
     if (typeof window !== "undefined") {
-      (window as any).__geospatialAtlasRefreshLines = () => refreshLines();
-      (window as any).__geospatialAtlasQueryLines = (bbox: any) => queryLines?.(bbox);
+      (window as any).__geospatialAtlasRefreshLines = () => pushLinesViewport();
     }
   });
 
