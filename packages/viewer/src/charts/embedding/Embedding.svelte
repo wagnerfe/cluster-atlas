@@ -217,8 +217,6 @@
     }
     currentViewportAnimation = requestAnimationFrame(callback);
   }
-
-
 </script>
 
 <div class="relative">
@@ -240,6 +238,7 @@
     importance={spec.data.importance}
     category={categoryLegend?.indexColumn}
     categoryColors={categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor]}
+    lines={spec.data.lines}
     config={{
       colorScheme: $colorScheme,
       ...context.embeddingViewConfig,
@@ -249,8 +248,7 @@
       ...(spec.minimumDensity != null ? { minimumDensity: spec.minimumDensity } : {}),
       pointSize: spec.pointSize ?? 2,
       downsampleMaxPoints: spec.downsampleMaxPoints ?? defaultDownsampleMaxPoints,
-      downsampleMaxPointsInteractive:
-        spec.downsampleMaxPointsInteractive ?? defaultDownsampleMaxPointsInteractive,
+      downsampleMaxPointsInteractive: spec.downsampleMaxPointsInteractive ?? defaultDownsampleMaxPointsInteractive,
     }}
     labels={context.embeddingViewLabels}
     cache={context.persistentCache}

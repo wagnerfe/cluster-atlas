@@ -10,6 +10,25 @@ import type { EmbeddingViewConfig } from "./embedding_view_config.js";
 import type { ThemeConfig } from "./theme.js";
 import type { Cache, CustomComponent, DataField, DataPoint, DataPointID, Label, OverlayProxy } from "./types.js";
 
+/** Configuration for the optional Match-Lines overlay (matcher-eval view).
+ *  Lines are drawn between two endpoints from a separate table, as a
+ *  viewport-culled MapLibre line layer above `minZoom`. See ADR-0001. */
+export interface MatchLinesConfig {
+  /** The table holding the line endpoints (e.g. "lines"). */
+  table: string;
+  /** Longitude/latitude columns for the two endpoints. */
+  x1: string;
+  y1: string;
+  x2: string;
+  y2: string;
+  /** Column whose value selects the line color (e.g. match pair type). */
+  pairType?: string | null;
+  /** Informational score column (carried through for future filtering). */
+  score?: string | null;
+  /** Zoom threshold below which lines are hidden (they are sub-pixel). */
+  minZoom?: number | null;
+}
+
 export interface EmbeddingViewMosaicProps {
   /** The Mosaic coordinator.
    *  If not specified, the default coordinator from Mosaic's `coordinator()` method will be used. */
@@ -177,6 +196,11 @@ export interface EmbeddingViewMosaicProps {
 
   /** A cache for intermediate results. */
   cache?: Cache | null;
+
+  /** Optional Match-Lines overlay (matcher-eval view). When set, a
+   *  viewport-culled MapLibre line layer is drawn between the endpoints in
+   *  `lines.table`, above `lines.minZoom`. */
+  lines?: MatchLinesConfig | null;
 }
 
 export class EmbeddingViewMosaic {

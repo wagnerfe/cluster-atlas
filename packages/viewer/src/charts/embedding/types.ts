@@ -1,6 +1,12 @@
 // Copyright (c) 2025 Apple Inc. Licensed under MIT License.
 
-import type { EmbeddingViewConfig, Point, Rectangle, ViewportState } from "@embedding-atlas/component";
+import type {
+  EmbeddingViewConfig,
+  MatchLinesConfig,
+  Point,
+  Rectangle,
+  ViewportState,
+} from "@embedding-atlas/component";
 
 export interface EmbeddingSpec {
   type: "embedding";
@@ -35,6 +41,9 @@ export interface EmbeddingSpec {
       rowCount?: number;
       skipDeferredRefine?: boolean;
     } | null;
+
+    /** Optional Match-Lines overlay (matcher-eval view). */
+    lines?: MatchLinesConfig | null;
   };
 
   mode?: "points" | "density";

@@ -303,6 +303,8 @@
             isGis: data.projection.isGis ?? undefined,
             image: data.image ?? undefined,
             importance: data.importance ?? undefined,
+            category: data.category ?? undefined,
+            lines: data.lines ?? undefined,
           }
         : undefined;
       // Only seed primary charts when the saved state is empty;
@@ -327,9 +329,7 @@
       // the GPU upload, then the side-panel charts populate quietly.
       const scheduleColumnDiscovery = () => {
         const t0 = performance.now();
-        console.log(
-          `[atlas-discover] starting column-chart discovery: ${columns.length} columns, table=${data.table}`,
-        );
+        console.log(`[atlas-discover] starting column-chart discovery: ${columns.length} columns, table=${data.table}`);
         defaultColumnCharts({
           coordinator,
           table: data.table,
@@ -339,9 +339,7 @@
         })
           .then((extra) => {
             const dt = performance.now() - t0;
-            console.log(
-              `[atlas-discover] discovery resolved: ${extra.length} extra charts in ${dt.toFixed(0)}ms`,
-            );
+            console.log(`[atlas-discover] discovery resolved: ${extra.length} extra charts in ${dt.toFixed(0)}ms`);
             if (extra.length === 0) return;
             // Find the highest-numbered chart id currently in use so
             // we can append after them. ``Object.keys`` may return
@@ -361,10 +359,7 @@
           })
           .catch((err) => {
             const dt = performance.now() - t0;
-            console.warn(
-              `[atlas-discover] column-chart discovery FAILED in ${dt.toFixed(0)}ms:`,
-              err,
-            );
+            console.warn(`[atlas-discover] column-chart discovery FAILED in ${dt.toFixed(0)}ms:`, err);
           });
       };
       // Wait for the scatter render to land. Polled because we don't have a

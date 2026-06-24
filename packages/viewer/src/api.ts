@@ -73,6 +73,10 @@ export interface EmbeddingAtlasProps {
     /** The column for importance scores (e.g., PageRank, centrality). Used with `image` to select representative images for cluster labels. */
     importance?: string | null;
 
+    /** Default column to color points by on load (e.g. "point_class"). The
+     *  user can still change it from the Color menu. */
+    category?: string | null;
+
     /** Optional secondary "lines" dataset for the matcher-eval view: Match
      *  Lines drawn between matched points. Loaded into its own DuckDB table
      *  (see `database.linesFiles`) and rendered as a viewport-culled MapLibre

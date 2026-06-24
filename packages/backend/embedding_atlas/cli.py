@@ -523,6 +523,9 @@ def _run_fast_path(
             props["data"]["projection"]["viewportHint"]["skipDeferredRefine"] = True
     if lines_data_props is not None:
         props.setdefault("data", {})["lines"] = lines_data_props
+        # Color points by their matcher-eval class on load (the four Point
+        # classes). The user can still switch the Color column in the UI.
+        props["data"]["category"] = "point_class"
     metadata = {"props": props}
     identifier = sha256_hexdigest(
         [__version__, [fast_connection.table], metadata], scope="DataSource"

@@ -32,6 +32,10 @@ interface ProjectionInput {
   isGis?: boolean;
   image?: string;
   importance?: string;
+  /** Default category column to color points by (e.g. "point_class"). */
+  category?: string;
+  /** Optional Match-Lines overlay (matcher-eval view). */
+  lines?: import("@embedding-atlas/component").MatchLinesConfig | null;
   bounds?: { x: [number, number]; y: [number, number] } | null;
   /** Names of pre-computed u16-quantised x/y columns. When set, the
    *  scatter wire query becomes a pure scan — see `EmbeddingViewMosaic`. */
@@ -73,9 +77,11 @@ export function defaultPrimaryCharts(options: {
         isGis: projection.isGis,
         image: projection.image,
         importance: projection.importance,
+        category: projection.category,
         bounds: projection.bounds,
         precomputed: projection.precomputed,
         viewportHint: projection.viewportHint,
+        lines: projection.lines,
       },
     };
     if (typeof config.embedding == "object") {
@@ -123,8 +129,7 @@ export async function defaultColumnCharts(options: {
   }
 
   let columns =
-    options.columns ??
-    (await columnDescriptions(coordinator, table)).filter((x) => !x.name.startsWith("__"));
+    options.columns ?? (await columnDescriptions(coordinator, table)).filter((x) => !x.name.startsWith("__"));
 
   let charts: BuiltinChartSpec[] = [];
 
@@ -147,12 +152,13 @@ export async function defaultColumnCharts(options: {
   let distinctMap: Map<string, number>;
   try {
     distinctMap = await Promise.race([
-      distinctCountBatch(coordinator, table, candidates.map((c) => c.name)),
+      distinctCountBatch(
+        coordinator,
+        table,
+        candidates.map((c) => c.name),
+      ),
       new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("distinctCountBatch timeout (15 s) — falling back to heuristics")),
-          15_000,
-        ),
+        setTimeout(() => reject(new Error("distinctCountBatch timeout (15 s) — falling back to heuristics")), 15_000),
       ),
     ]);
   } catch (err) {

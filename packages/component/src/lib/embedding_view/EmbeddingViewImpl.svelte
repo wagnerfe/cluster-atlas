@@ -40,6 +40,18 @@
     onSelection: ((value: Selection[] | null) => void) | null;
     onRangeSelection: ((value: Rectangle | Point[] | null) => void) | null;
     cache: Cache | null;
+    /** Optional Match-Lines overlay config (matcher-eval view). */
+    lines?: MatchLinesConfig | null;
+    /** Fetches the Match Lines whose first endpoint lies in a lon/lat bbox.
+     *  Provided by the Mosaic wrapper, which owns the coordinator. */
+    queryLines?:
+      | ((bbox: {
+          xMin: number;
+          xMax: number;
+          yMin: number;
+          yMax: number;
+        }) => Promise<{ x1: number; y1: number; x2: number; y2: number; pairType: string | null }[]>)
+      | null;
   }
 
   interface Cluster {
@@ -136,6 +148,7 @@
   import { layoutLabels, type LabelWithPlacement } from "./labels.js";
   import { simplifyPolygon } from "./simplify_polygon.js";
   import { resolveTheme, type ThemeConfig } from "./theme.js";
+  import type { MatchLinesConfig } from "./embedding_view_mosaic_api.js";
   import type { Cache, CustomComponent, Label, LabelContent, OverlayProxy } from "./types.js";
   import { findClusters } from "./worker/index.js";
 
@@ -175,6 +188,8 @@
     onSelection = null,
     onRangeSelection = null,
     cache = null,
+    lines = null,
+    queryLines = null,
   }: Props<Selection> = $props();
 
   let showClusterLabels = true;
@@ -203,7 +218,7 @@
       const RAD_DEG = 180 / Math.PI;
       const log = Math.log;
       const tan = Math.tan;
-      const __t0 = (typeof performance !== "undefined") ? performance.now() : 0;
+      const __t0 = typeof performance !== "undefined" ? performance.now() : 0;
       for (let i = 0; i < n; i++) {
         const latRad = inY[i] * PI180;
         y[i] = log(tan(PI4 + latRad * 0.5)) * RAD_DEG;
@@ -222,7 +237,7 @@
 
   // In GIS mode, the minimum scale corresponds to MapLibre zoom level 1.
   // Below this, MapLibre's jumpTo can't keep up and the map/point layers diverge.
-  let gisMinScale = $derived(1024 * 2 / (360 * width));
+  let gisMinScale = $derived((1024 * 2) / (360 * width));
 
   let resolvedViewportState = $derived.by(() => {
     let state = viewportState ?? defaultViewportState ?? { x: 0, y: 0, scale: 1 };
@@ -236,13 +251,19 @@
       }
       // Clamp Y so the view stays within Mercator bounds (±85.05° lat → ±180 projected)
       const mercatorMax = 180;
-      const sy = width >= height ? scale * width / height : scale;
+      const sy = width >= height ? (scale * width) / height : scale;
       const visibleHalfY = 1 / sy;
       const yMin = -mercatorMax + visibleHalfY;
       const yMax = mercatorMax - visibleHalfY;
       if (yMin < yMax) {
-        if (y < yMin) { y = yMin; clamped = true; }
-        if (y > yMax) { y = yMax; clamped = true; }
+        if (y < yMin) {
+          y = yMin;
+          clamped = true;
+        }
+        if (y > yMax) {
+          y = yMax;
+          clamped = true;
+        }
       }
       if (clamped) {
         return { ...state, scale, y };
@@ -379,7 +400,9 @@
   let mode = $derived(perfOverrides?.renderMode ?? config?.mode ?? "points");
   let autoLabelEnabled = $derived(config?.autoLabelEnabled);
   let downsampleMaxPoints = $derived(perfOverrides?.downsampleMaxPoints ?? config?.downsampleMaxPoints ?? 4000000);
-  let downsampleDensityWeight = $derived(perfOverrides?.downsampleDensityWeight ?? config?.downsampleDensityWeight ?? 5);
+  let downsampleDensityWeight = $derived(
+    perfOverrides?.downsampleDensityWeight ?? config?.downsampleDensityWeight ?? 5,
+  );
   // Cap to use during active drag/wheel. Defaults to a value that keeps
   // 75M-row Overture parquets at >20fps on Apple Silicon WebGPU; opt-out
   // via downsampleMaxPointsInteractive=null in config or ?interactiveCap=0
@@ -391,7 +414,7 @@
     // having to know the configured `downsampleMaxPoints`.
     perfOverrides && "downsampleMaxPointsInteractive" in perfOverrides
       ? perfOverrides.downsampleMaxPointsInteractive
-      : config?.downsampleMaxPointsInteractive ?? 200_000,
+      : (config?.downsampleMaxPointsInteractive ?? 200_000),
   );
   let effectiveDownsampleMaxPoints = $derived.by(() => {
     // Once we have an initial frame, ``skipDownsampleCompute`` is true
@@ -411,11 +434,7 @@
     // (drawIndirect over the prior compact set is ~2-3 ms), so the
     // interactive cap buys us nothing — keep the buffer at its full
     // allocated size for the entire gesture lifetime.
-    if (
-      isInteracting &&
-      downsampleMaxPointsInteractive != null &&
-      Number.isFinite(downsampleMaxPointsInteractive)
-    ) {
+    if (isInteracting && downsampleMaxPointsInteractive != null && Number.isFinite(downsampleMaxPointsInteractive)) {
       if (hasInitialFrame) {
         return downsampleMaxPoints;
       }
@@ -546,11 +565,7 @@
       bumpDbg("cssPanSkipped_noRendered");
     } else if (Math.abs(resolvedViewportState.scale - renderedViewport.scale) >= 1e-9) {
       bumpDbg("cssPanSkipped_scaleChanged");
-    } else if (
-      isInteracting &&
-      renderedViewport != null &&
-      canvas != null
-    ) {
+    } else if (isInteracting && renderedViewport != null && canvas != null) {
       const d = cssPanDelta();
       if (d != null) {
         // Always apply CSS-pan during interaction — never fall through
@@ -611,7 +626,8 @@
       // appear until release. Acceptable — the release re-render
       // catches up.
       skipDownsampleCompute:
-        isInteracting && hasInitialFrame &&
+        isInteracting &&
+        hasInitialFrame &&
         // When cap is 0 the stale indirect-args from the last non-zero compute
         // would replay the previous frame's draw count — force compute so the
         // downsample early-return clears the args to zero.
@@ -768,14 +784,16 @@
     // panel — gating it on perf mode meant the panel only appeared with
     // ``?perf=1`` (or after a 60 s safety net). One observer per render
     // until the flag flips, then this branch is dead.
-    if (dev && count > 0 && !((window as any).__atlasFirstBigRenderGpuLogged)) {
+    if (dev && count > 0 && !(window as any).__atlasFirstBigRenderGpuLogged) {
       dev.queue.onSubmittedWorkDone().then(() => {
         const w: any = window as any;
         if (!w.__atlasFirstBigRenderGpuLogged) {
           w.__atlasFirstBigRenderGpuLogged = true;
           if (perfOn && count > 1_000_000) {
             const dur = performance.now() - t0;
-            console.log(`[atlas-stage] first-big-render-gpu-done ${performance.now().toFixed(0)} took=${dur.toFixed(0)}ms`);
+            console.log(
+              `[atlas-stage] first-big-render-gpu-done ${performance.now().toFixed(0)} took=${dur.toFixed(0)}ms`,
+            );
           }
         }
       });
@@ -785,9 +803,7 @@
       const cap = renderer.props.downsampleMaxPoints;
       const downsampled = cap != null && Number.isFinite(cap) && cap > 0 && count > cap;
       perfSetPointCount(count);
-      const whenGpuDone = dev
-        ? dev.queue.onSubmittedWorkDone().then(() => performance.now() - t0)
-        : undefined;
+      const whenGpuDone = dev ? dev.queue.onSubmittedWorkDone().then(() => performance.now() - t0) : undefined;
       perfRecord({ cpuMs: dt, downsampled, whenGpuDone });
     }
     // Clear the CSS-pan transform after the GPU has finished presenting
@@ -986,6 +1002,144 @@
     if (map && width && height) {
       map.resize();
     }
+  });
+
+  // ---- Match-Lines overlay (matcher-eval view) ----------------------------
+  // A viewport-culled MapLibre line layer drawn on the same (already
+  // camera-synced) basemap map. Lines are <=400 m, hence sub-pixel below
+  // `minZoom`; we only query + draw the viewport's worth above it. ADR-0001.
+  const LINES_SOURCE_ID = "match-lines-source";
+  const LINES_LAYER_ID = "match-lines-layer";
+  const EMPTY_FC = { type: "FeatureCollection" as const, features: [] };
+  let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let linesRequestSeq = 0;
+
+  function linesColorExpression(): any {
+    if (lines?.pairType == null) {
+      return "#2ca02c";
+    }
+    return [
+      "match",
+      ["get", "pairType"],
+      "candidate->baseline",
+      "#2ca02c",
+      "candidate->candidate",
+      "#ff7f0e",
+      "baseline->baseline",
+      "#9467bd",
+      "#888888",
+    ];
+  }
+
+  function ensureLinesLayer() {
+    if (!map || lines == null || !map.isStyleLoaded()) {
+      return;
+    }
+    if (map.getSource(LINES_SOURCE_ID)) {
+      return;
+    }
+    map.addSource(LINES_SOURCE_ID, { type: "geojson", data: EMPTY_FC });
+    map.addLayer({
+      id: LINES_LAYER_ID,
+      type: "line",
+      source: LINES_SOURCE_ID,
+      minzoom: lines.minZoom ?? 12,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": linesColorExpression(),
+        "line-width": 1.5,
+        "line-opacity": 0.7,
+      },
+    });
+  }
+
+  async function refreshLines() {
+    if (!map || lines == null || queryLines == null) {
+      return;
+    }
+    ensureLinesLayer();
+    const source = map.getSource(LINES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+    if (!source) {
+      return;
+    }
+    // Below the zoom gate the lines are sub-pixel — clear and skip the query.
+    if (map.getZoom() < (lines.minZoom ?? 12)) {
+      source.setData(EMPTY_FC);
+      return;
+    }
+    // Lines are <=400 m; expand the viewport bbox by ~1 km so lines whose
+    // first endpoint sits just off-screen are still drawn.
+    const b = map.getBounds();
+    const margin = 0.01;
+    const seq = ++linesRequestSeq;
+    let rows: { x1: number; y1: number; x2: number; y2: number; pairType: string | null }[];
+    try {
+      rows = await queryLines({
+        xMin: b.getWest() - margin,
+        xMax: b.getEast() + margin,
+        yMin: b.getSouth() - margin,
+        yMax: b.getNorth() + margin,
+      });
+    } catch (e) {
+      console.warn("Match Lines: viewport query failed", e);
+      return;
+    }
+    // Drop stale results from a superseded viewport.
+    if (seq !== linesRequestSeq || !map) {
+      return;
+    }
+    const stillThere = map.getSource(LINES_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+    stillThere?.setData({
+      type: "FeatureCollection",
+      features: rows.map((r) => ({
+        type: "Feature" as const,
+        geometry: {
+          type: "LineString" as const,
+          coordinates: [
+            [r.x1, r.y1],
+            [r.x2, r.y2],
+          ],
+        },
+        properties: { pairType: r.pairType },
+      })),
+    });
+  }
+
+  function scheduleLinesRefresh() {
+    if (linesRefreshTimer != null) {
+      clearTimeout(linesRefreshTimer);
+    }
+    linesRefreshTimer = setTimeout(() => {
+      linesRefreshTimer = null;
+      refreshLines();
+    }, 150);
+  }
+
+  // Re-add the layer whenever the style (re)loads, and refresh on every
+  // viewport change. Reading `resolvedViewportState` registers the dependency
+  // so this re-runs as the camera moves.
+  $effect(() => {
+    void resolvedViewportState;
+    if (!map || lines == null) {
+      return;
+    }
+    const onStyle = () => {
+      ensureLinesLayer();
+      scheduleLinesRefresh();
+    };
+    map.on("styledata", onStyle);
+    if (map.isStyleLoaded()) {
+      onStyle();
+    }
+    scheduleLinesRefresh();
+    // Expose a manual refresh for E2E testing (mirrors the other
+    // __geospatialAtlas* test globals). No-op for normal usage.
+    if (typeof window !== "undefined") {
+      (window as any).__geospatialAtlasRefreshLines = () => refreshLines();
+    }
+    return () => {
+      map?.off("styledata", onStyle);
+    };
   });
 
   $effect(() => {

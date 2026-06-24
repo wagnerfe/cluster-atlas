@@ -2,7 +2,11 @@
 
 import { isWebGPUAvailable } from "../webgpu_renderer/utils.js";
 export { EmbeddingView, type EmbeddingViewProps } from "./embedding_view_api.js";
-export { EmbeddingViewMosaic, type EmbeddingViewMosaicProps } from "./embedding_view_mosaic_api.js";
+export {
+  EmbeddingViewMosaic,
+  type EmbeddingViewMosaicProps,
+  type MatchLinesConfig,
+} from "./embedding_view_mosaic_api.js";
 
 export function maxDensityModeCategories(): number {
   // In WebGL2, we only support max 4 categories.

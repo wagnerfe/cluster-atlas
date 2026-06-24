@@ -12,6 +12,7 @@ export {
   maxDensityModeCategories,
   type EmbeddingViewMosaicProps,
   type EmbeddingViewProps,
+  type MatchLinesConfig,
 } from "./embedding_view/api.js";
 
 export { defaultCategoryColors } from "./colors.js";

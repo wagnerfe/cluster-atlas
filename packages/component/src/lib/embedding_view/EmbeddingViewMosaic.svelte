@@ -67,7 +67,67 @@
     onSelection = null,
     onRangeSelection = null,
     cache = null,
+    lines = null,
   }: EmbeddingViewMosaicProps = $props();
+
+  // Maximum Match Lines fetched per viewport refresh. Lines are <=400 m, so a
+  // viewport at the gating zoom holds a bounded number; the cap guards against
+  // a pathologically dense metro. Hitting it is logged, not silent (ADR-0001).
+  const LINES_VIEWPORT_CAP = 50000;
+
+  /** Fetch Match Lines whose first endpoint falls within `bbox` (lon/lat,
+   *  already expanded by the caller to catch lines straddling the edge).
+   *  Returns plain endpoint rows for the MapLibre line layer. */
+  async function queryLines(bbox: {
+    xMin: number;
+    xMax: number;
+    yMin: number;
+    yMax: number;
+  }): Promise<{ x1: number; y1: number; x2: number; y2: number; pairType: string | null }[]> {
+    if (lines == null) {
+      return [];
+    }
+    let select: Record<string, any> = {
+      x1: SQL.column(lines.x1),
+      y1: SQL.column(lines.y1),
+      x2: SQL.column(lines.x2),
+      y2: SQL.column(lines.y2),
+    };
+    if (lines.pairType != null) {
+      select.pairType = SQL.column(lines.pairType);
+    }
+    let query = SQL.Query.from(lines.table)
+      .select(select)
+      .where(
+        SQL.and(
+          SQL.isBetween(SQL.column(lines.x1), [bbox.xMin, bbox.xMax]),
+          SQL.isBetween(SQL.column(lines.y1), [bbox.yMin, bbox.yMax]),
+        ),
+      )
+      .limit(LINES_VIEWPORT_CAP);
+    // Arrow result: read columns and zip into rows (matches the column-wise
+    // ``getChild(...).toArray()`` access used elsewhere in this file).
+    let result: any = await coordinator.query(query);
+    let x1 = result.getChild("x1").toArray();
+    let y1 = result.getChild("y1").toArray();
+    let x2 = result.getChild("x2").toArray();
+    let y2 = result.getChild("y2").toArray();
+    let pairTypeVec = lines.pairType != null ? result.getChild("pairType") : null;
+    let out: { x1: number; y1: number; x2: number; y2: number; pairType: string | null }[] = [];
+    for (let i = 0; i < x1.length; i++) {
+      out.push({
+        x1: x1[i],
+        y1: y1[i],
+        x2: x2[i],
+        y2: y2[i],
+        pairType: pairTypeVec != null ? String(pairTypeVec.get(i)) : null,
+      });
+    }
+    if (out.length >= LINES_VIEWPORT_CAP) {
+      console.warn(`Match Lines: viewport hit the ${LINES_VIEWPORT_CAP}-line cap; some lines not drawn.`);
+    }
+    return out;
+  }
 
   // Stable empty sentinel. Reusing one identity across "no data" updates
   // lets the renderer's gpuBufferData identity check short-circuit
@@ -160,10 +220,11 @@
               .then((real) => {
                 if (didDestroy) return;
                 const dt = performance.now() - t0;
-                console.info(
-                  `[atlas-stage] deferred-density-refine done in ${dt.toFixed(0)}ms`,
-                  { categoryCount: real.categoryCount, totalCount: real.totalCount, maxDensity: real.maxDensity },
-                );
+                console.info(`[atlas-stage] deferred-density-refine done in ${dt.toFixed(0)}ms`, {
+                  categoryCount: real.categoryCount,
+                  totalCount: real.totalCount,
+                  maxDensity: real.maxDensity,
+                });
                 totalCount = real.totalCount || totalCount;
                 maxDensity = real.maxDensity;
                 categoryCount = real.categoryCount;
@@ -225,8 +286,8 @@
       // does, advertise it through ``yIsAlreadyMercator`` so
       // ``EmbeddingViewImpl`` skips its 5.9 s JS Mercator loop on 322 M
       // rows.
-      const precomputedYIsMerc = packed && precomputedCols != null
-        && (precomputedCols as { y_is_mercator?: boolean }).y_is_mercator === true;
+      const precomputedYIsMerc =
+        packed && precomputedCols != null && (precomputedCols as { y_is_mercator?: boolean }).y_is_mercator === true;
       yIsAlreadyMercator = gisProjectInQuery || precomputedYIsMerc;
       client = makeClient({
         coordinator: deps.coordinator,
@@ -286,7 +347,7 @@
           // server-side ``combine_chunks`` we get a single chunk, and
           // toArray returns the underlying buffer view at zero cost.
           const t0 = performance.now();
-          const numRowsHint = (data && typeof data.numRows === "number") ? data.numRows : -1;
+          const numRowsHint = data && typeof data.numRows === "number" ? data.numRows : -1;
           console.info(`[atlas-stage] scatter-queryResult arrived numRows=${numRowsHint} at ${t0.toFixed(0)}`);
           // Drop the previous batch's heap refs BEFORE allocating the next.
           // Each ``getChild().toArray()`` materialises a fresh contiguous
@@ -323,10 +384,7 @@
           // apps/desktop/electron/main.ts). Gated by row count so the
           // dev/standalone packages (where ``gc`` is never exposed) and
           // small datasets pay no cost.
-          if (
-            numRowsHint > 50_000_000 &&
-            typeof (globalThis as any).gc === "function"
-          ) {
+          if (numRowsHint > 50_000_000 && typeof (globalThis as any).gc === "function") {
             (globalThis as any).gc();
           }
           let xArray, yArray, categoryArray;
@@ -395,7 +453,12 @@
           updateSelection(null);
           const n = (xArray as any)?.length ?? 0;
           if (n > 1_000_000) {
-            const mb = (((xArray as any)?.byteLength ?? 0) + ((yArray as any)?.byteLength ?? 0) + (categoryArray?.byteLength ?? 0)) / 1024 / 1024;
+            const mb =
+              (((xArray as any)?.byteLength ?? 0) +
+                ((yArray as any)?.byteLength ?? 0) +
+                (categoryArray?.byteLength ?? 0)) /
+              1024 /
+              1024;
             const path = nextXPacked != null ? "u32-direct" : "f32";
             console.log(
               `[scatter] ${n.toLocaleString()} pts (${mb.toFixed(0)} MB JS heap, ${path}) | toArray=${(t1 - t0).toFixed(0)} ms | typed-array-coerce=${(t2 - t1).toFixed(0)} ms`,
@@ -764,9 +827,7 @@
   yIsAlreadyMercator={yIsAlreadyMercator}
   totalCount={totalCount}
   maxDensity={maxDensity}
-  categoryCount={categoryColors != null && categoryColors.length > 1
-    ? categoryColors.length
-    : categoryCount}
+  categoryCount={categoryColors != null && categoryColors.length > 1 ? categoryColors.length : categoryCount}
   categoryColors={categoryColors}
   defaultViewportState={defaultViewportState}
   querySelection={querySelection}
@@ -786,4 +847,6 @@
     onRangeSelection?.(v);
   }}
   cache={cache}
+  lines={lines}
+  queryLines={lines != null ? queryLines : null}
 />
