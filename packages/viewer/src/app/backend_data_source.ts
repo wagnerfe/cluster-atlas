@@ -10,6 +10,16 @@ import { exportMosaicSelection, filenameForSelection, type ExportFormat } from "
 import type { DataSource } from "./data_source.js";
 import { MCPWebSocketServer } from "./mcp_server.js";
 
+/** Build a `CREATE OR REPLACE TABLE ... AS read_parquet(...)` for one or many
+ *  parquet parts. */
+function loadTableQuery(table: string, urls: string[]): string {
+  if (urls.length === 1) {
+    return `CREATE OR REPLACE TABLE ${table} AS (SELECT * FROM read_parquet(${SQL.literal(urls[0])}));`;
+  }
+  const urlsList = urls.map((url: string) => SQL.literal(url)).join(", ");
+  return `CREATE OR REPLACE TABLE ${table} AS (SELECT * FROM read_parquet([${urlsList}]));`;
+}
+
 function joinUrl(a: string, b: string) {
   if (b.startsWith(".")) {
     b = b.slice(1);
@@ -33,6 +43,12 @@ interface Metadata {
     load?: boolean;
     files?: string[];
     datasetUrl?: string;
+    /** Optional secondary "lines" dataset (matcher-eval Match Lines). Loaded
+     *  into its own table (`linesTable`, default "lines") alongside the main
+     *  dataset. The parquet part(s) are resolved against the same base URL as
+     *  `files`. See `EmbeddingAtlasProps.data.lines`. */
+    linesFiles?: string[];
+    linesTable?: string;
   };
 
   mcp?: {
@@ -72,14 +88,17 @@ export class BackendDataSource implements DataSource {
       const files = metadata.database?.files ?? ["dataset.parquet"];
       const datasetUrls = files.map((f: string) => joinUrl(baseUrl, f));
 
-      let loadQuery;
-      if (datasetUrls.length === 1) {
-        loadQuery = `CREATE OR REPLACE TABLE ${table} AS (SELECT * FROM read_parquet(${SQL.literal(datasetUrls[0])}));`;
-      } else {
-        const urlsList = datasetUrls.map((url: string) => SQL.literal(url)).join(", ");
-        loadQuery = `CREATE OR REPLACE TABLE ${table} AS (SELECT * FROM read_parquet([${urlsList}]));`;
+      await coordinator.exec(loadTableQuery(table, datasetUrls));
+
+      // Optional secondary "lines" table for the matcher-eval view. Loaded the
+      // same way, resolved against the same base URL. Absent for ordinary
+      // datasets, so this is a no-op there.
+      const linesFiles = metadata.database?.linesFiles;
+      if (linesFiles && linesFiles.length > 0) {
+        const linesTable = metadata.database?.linesTable ?? "lines";
+        const linesUrls = linesFiles.map((f: string) => joinUrl(baseUrl, f));
+        await coordinator.exec(loadTableQuery(linesTable, linesUrls));
       }
-      await coordinator.exec(loadQuery);
     }
 
     if (!metadata.isStatic) {

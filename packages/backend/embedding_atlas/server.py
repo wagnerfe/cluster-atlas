@@ -119,6 +119,9 @@ def make_server(
     materialise_table: str | None = None,
     materialise_error: list | None = None,
     prewarm_arrow_queries: list[str] | None = None,
+    lines_parquet: "Callable[[], bytes] | None" = None,
+    lines_files: list[str] | None = None,
+    lines_table_name: str = "lines",
 ):
     """Creates a server for hosting Geospatial Atlas.
 
@@ -167,6 +170,17 @@ def make_server(
         _dataset_parquet_bytes,
     )
 
+    # Optional secondary "lines" dataset for the matcher-eval view. Served so
+    # the wasm path (and archive export) can fetch it; the server path queries
+    # the in-process ``lines`` table directly.
+    if lines_parquet is not None:
+        mount_bytes(
+            app,
+            "/data/lines.parquet",
+            "application/octet-stream",
+            lines_parquet,
+        )
+
     @app.get("/data/metadata.json")
     async def get_metadata():
         meta = {}
@@ -192,6 +206,13 @@ def make_server(
                 }
             else:
                 raise ValueError("invalid DuckDB uri")
+        # Secondary "lines" dataset: advertise the parquet part(s) so the wasm
+        # path loads them into their own table. In server mode the table is
+        # already present in-process, so the frontend ignores this.
+        if lines_files and "database" in meta:
+            meta["database"]["linesFiles"] = lines_files
+            meta["database"]["linesTable"] = lines_table_name
+
         # MCP
         if mcp:
             meta["mcp"] = {"type": "websocket"}

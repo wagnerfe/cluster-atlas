@@ -39,8 +39,11 @@ rendered in a distinct line color.
 
 The line drawn between the two records of a `match_type='match'` Match Result, from the
 `id` endpoint to the `base_id` endpoint (each placed by its type-aware folder lookup).
-One per `match` row. Colored by Match Pair Type. Rendered by the WebGPU renderer as a
-line primitive (not points). Scale target: up to 50M Match Lines.
+One per `match` row. Colored by Match Pair Type. Every Match Line is ≤ 400 m long, so it
+is sub-pixel below ~zoom 12 — Match Lines are a zoomed-in inspection feature, rendered as
+a viewport-culled MapLibre line layer above a tunable zoom threshold (see ADR-0001), not
+as a WebGPU primitive. Up to 50M exist in total, but only a viewport's worth is ever
+drawn at once.
 
 ### Point class
 

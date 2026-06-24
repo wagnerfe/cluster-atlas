@@ -370,6 +370,8 @@ def _run_fast_path(
     enable_mcp: bool,
     cors,
     duckdb_uri: str,
+    lines_glob: str | None = None,
+    lines_min_zoom: float | None = None,
 ):
     """Serve the pre-populated DuckDB connection via FastAPI+uvicorn.
 
@@ -380,9 +382,38 @@ def _run_fast_path(
     from .data_source import DataSource
     from .options import make_embedding_atlas_props
     from .server import make_server
+    from .utils import to_parquet_bytes
     from .version import __version__
 
     con = fast_connection.connection
+
+    # Optional secondary "lines" dataset (matcher-eval Match Lines). Loaded into
+    # its own in-process table so the viewer can query it by viewport. The
+    # frontend renders it as a viewport-culled MapLibre line layer (ADR-0001).
+    lines_data_props: dict | None = None
+    lines_parquet_provider = None
+    lines_files = None
+    if lines_glob is not None:
+        con.execute(
+            'CREATE OR REPLACE TABLE "lines" AS '
+            "SELECT * FROM read_parquet($glob)",
+            {"glob": lines_glob},
+        )
+
+        def lines_parquet_provider() -> bytes:  # noqa: F811
+            return to_parquet_bytes(con.sql('SELECT * FROM "lines"').df())
+
+        lines_files = ["lines.parquet"]
+        lines_data_props = {
+            "table": "lines",
+            "x1": "lon1",
+            "y1": "lat1",
+            "x2": "lon2",
+            "y2": "lat2",
+            "pairType": "match_pair_type",
+            "score": "composite_score",
+            "minZoom": lines_min_zoom,
+        }
     # ``fast_load_parquet`` already provisioned a stable per-row id by
     # projecting the parquet reader's ``file_row_number`` virtual column.
     # No ALTER TABLE / UPDATE needed — and importantly cannot be done on
@@ -490,6 +521,8 @@ def _run_fast_path(
             # ``viewportHint`` is good enough — sub-percent error in the
             # density colour ramp is invisible at continental zoom.
             props["data"]["projection"]["viewportHint"]["skipDeferredRefine"] = True
+    if lines_data_props is not None:
+        props.setdefault("data", {})["lines"] = lines_data_props
     metadata = {"props": props}
     identifier = sha256_hexdigest(
         [__version__, [fast_connection.table], metadata], scope="DataSource"
@@ -569,6 +602,8 @@ def _run_fast_path(
         materialise_table=fast_connection.materialise_table,
         materialise_error=fast_connection.materialise_error,
         prewarm_arrow_queries=[prewarm_sql],
+        lines_parquet=lines_parquet_provider,
+        lines_files=lines_files,
     )
 
     new_port = (

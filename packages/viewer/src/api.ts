@@ -72,6 +72,26 @@ export interface EmbeddingAtlasProps {
 
     /** The column for importance scores (e.g., PageRank, centrality). Used with `image` to select representative images for cluster labels. */
     importance?: string | null;
+
+    /** Optional secondary "lines" dataset for the matcher-eval view: Match
+     *  Lines drawn between matched points. Loaded into its own DuckDB table
+     *  (see `database.linesFiles`) and rendered as a viewport-culled MapLibre
+     *  line layer above `minZoom` (see ADR-0001). Absent for ordinary datasets. */
+    lines?: {
+      /** The DuckDB table holding the line endpoints (e.g. "lines"). */
+      table: string;
+      /** Longitude/latitude columns of the two endpoints. */
+      x1: string;
+      y1: string;
+      x2: string;
+      y2: string;
+      /** Column whose value selects the line color (match pair type). */
+      pairType?: string | null;
+      /** Informational score column (also used by the v1 score filter). */
+      score?: string | null;
+      /** Tunable zoom threshold below which Match Lines are hidden (sub-pixel). */
+      minZoom?: number | null;
+    } | null;
   };
 
   /** The color scheme. */

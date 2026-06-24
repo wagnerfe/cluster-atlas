@@ -365,8 +365,31 @@ def _log_summary(r: MatchEvalBuild) -> None:
     default=False,
     help="Rebuild even if a valid cached build already exists.",
 )
-def match_eval_cli(run_dir: str, out_dir: str | None, force: bool):
-    """Build the matcher-eval Expected Format (Points + Lines) from a run directory.
+@click.option(
+    "--build-only",
+    is_flag=True,
+    default=False,
+    help="Build the Expected Format and exit without launching the viewer.",
+)
+@click.option("--host", default="localhost", help="Host for the web server.")
+@click.option("--port", default=5055, help="Port for the web server.")
+@click.option(
+    "--lines-min-zoom",
+    type=float,
+    default=12.0,
+    help="Zoom threshold below which Match Lines are hidden (they are sub-pixel "
+    "at lower zoom). Default 12.",
+)
+def match_eval_cli(
+    run_dir: str,
+    out_dir: str | None,
+    force: bool,
+    build_only: bool,
+    host: str,
+    port: int,
+    lines_min_zoom: float,
+):
+    """Build the matcher-eval Expected Format (Points + Lines) and launch the viewer.
 
     RUN_DIR must contain candidates/, baseline/ and matches/ subfolders.
     """
@@ -375,6 +398,43 @@ def match_eval_cli(run_dir: str, out_dir: str | None, force: bool):
     click.echo()
     click.echo(click.style("  Points: ", bold=True) + result.points_path)
     click.echo(click.style("  Lines:  ", bold=True) + result.lines_path)
+
+    if build_only:
+        return
+
+    # Reuse the optimized GIS fast-load launch for the Points dataset, and hand
+    # the Lines parquet to the server so it loads a secondary "lines" table.
+    from .cli import _run_fast_path, _try_fast_load
+
+    fast_connection = _try_fast_load(
+        inputs=[result.points_path],
+        splits=[],
+        query=None,
+        sample=None,
+        text=None,
+        image=None,
+        audio=None,
+        vector=None,
+        x_column=None,
+        y_column=None,
+        duckdb_uri="server",
+    )
+    if fast_connection is None:
+        raise click.ClickException(
+            "Could not load the points dataset via the GIS fast path."
+        )
+    _run_fast_path(
+        fast_connection=fast_connection,
+        static=None,
+        host=host,
+        port=port,
+        enable_auto_port=True,
+        enable_mcp=False,
+        cors=None,
+        duckdb_uri="server",
+        lines_glob=result.lines_path,
+        lines_min_zoom=lines_min_zoom,
+    )
 
 
 if __name__ == "__main__":
