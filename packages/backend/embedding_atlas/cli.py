@@ -291,10 +291,18 @@ def _try_fast_load(
     if duckdb_uri != "server":
         return None
     path = inputs[0]
-    if path.startswith("hf://") or not pathlib.Path(path).is_file():
+    if path.startswith("hf://"):
         return None
-    if pathlib.Path(path).suffix.lower() != ".parquet":
+    p = pathlib.Path(path)
+    if p.is_file():
+        # Single file: must be parquet (csv/json etc. stay on the pandas path).
+        if p.suffix.lower() != ".parquet":
+            return None
+    elif not (p.is_dir() or any(ch in path for ch in "*?[")):
+        # Not a file, directory, or glob — nothing to fast-load.
         return None
+    # A directory of parquet parts or a glob (e.g. a prebuilt Spark ``points/``
+    # folder) is handled by fast_load_parquet's target resolver below.
 
     from .fast_load import fast_load_parquet
 

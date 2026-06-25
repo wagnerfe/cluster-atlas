@@ -61,6 +61,58 @@ def wkb_parquet(tmp_path):
     return path, n
 
 
+def test_directory_of_parts_loads_with_unique_ids(tmp_path):
+    """A directory of parquet parts (e.g. a Spark/Databricks ``points/`` folder)
+    loads via the recursive glob. Across parts ``file_row_number`` is not unique,
+    so the loader must fall back to a window row id — every row still gets a
+    distinct ``__row_index__``."""
+    d = tmp_path / "points"
+    d.mkdir()
+    total = 0
+    for part in range(3):
+        m = 40
+        tbl = pa.table(
+            {
+                "id": pa.array([f"p{part}-{i}" for i in range(m)]),
+                "lat": pa.array([(i % 180) - 90 + 0.5 for i in range(m)], type=pa.float64()),
+                "lon": pa.array([(i % 360) - 180 + 0.25 for i in range(m)], type=pa.float64()),
+                "name": pa.array([f"n{part}-{i}" for i in range(m)]),
+            }
+        )
+        pq.write_table(tbl, str(d / f"part-{part}.parquet"))
+        total += m
+
+    res = fast_load_parquet(str(d), materialise="table")
+    assert res.row_count == total
+    assert res.x_column == "lon" and res.y_column == "lat"
+    distinct = res.connection.sql(
+        f"SELECT COUNT(DISTINCT {res.id_column}) FROM {res.table}"
+    ).fetchone()[0]
+    assert distinct == total  # globally unique across all parts
+
+
+def test_glob_pattern_loads(tmp_path):
+    """An explicit ``**/*.parquet`` glob is accepted as the input path."""
+    d = tmp_path / "nested" / "type=place"
+    d.mkdir(parents=True)
+    tbl = pa.table(
+        {
+            "lat": pa.array([1.0, 2.0, 3.0]),
+            "lon": pa.array([4.0, 5.0, 6.0]),
+        }
+    )
+    pq.write_table(tbl, str(d / "part-0.parquet"))
+    res = fast_load_parquet(str(tmp_path / "nested" / "**" / "*.parquet"), materialise="table")
+    assert res.row_count == 3
+
+
+def test_missing_directory_raises(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        fast_load_parquet(str(empty))
+
+
 def test_default_materialise_is_view(latlon_parquet):
     """Default fast path returns a VIEW — no full materialisation,
     so initial render is fast. The server promotes view→table on the

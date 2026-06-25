@@ -421,8 +421,55 @@ def _log_summary(r: MatchEvalBuild) -> None:
     )
 
 
+def _launch_viewer(
+    points_input: str,
+    lines_glob: str,
+    *,
+    host: str,
+    port: int,
+    lines_min_zoom: float,
+) -> None:
+    """Load the Points dataset via the GIS fast path and launch the viewer with
+    the Lines dataset as a secondary table.
+
+    ``points_input`` may be a single ``.parquet`` file, a directory of parquet
+    parts, or a glob; ``lines_glob`` is a read_parquet target (file/dir-glob).
+    """
+    from .cli import _run_fast_path, _try_fast_load
+
+    fast_connection = _try_fast_load(
+        inputs=[points_input],
+        splits=[],
+        query=None,
+        sample=None,
+        text=None,
+        image=None,
+        audio=None,
+        vector=None,
+        x_column=None,
+        y_column=None,
+        duckdb_uri="server",
+    )
+    if fast_connection is None:
+        raise click.ClickException(
+            f"Could not load the points dataset via the GIS fast path: {points_input}"
+        )
+    _run_fast_path(
+        fast_connection=fast_connection,
+        static=None,
+        host=host,
+        port=port,
+        enable_auto_port=True,
+        enable_mcp=False,
+        cors=None,
+        duckdb_uri="server",
+        lines_glob=lines_glob,
+        lines_min_zoom=lines_min_zoom,
+    )
+
+
 @click.command(name="match-eval")
-@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False), required=False)
 @click.option(
     "--out",
     "out_dir",
@@ -443,6 +490,23 @@ def _log_summary(r: MatchEvalBuild) -> None:
     default=False,
     help="Build the Expected Format and exit without launching the viewer.",
 )
+@click.option(
+    "--points",
+    "points_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Prebuilt Points dataset (a .parquet file or a directory of parts, e.g. a "
+    "Databricks/Spark build downloaded locally). Skips the build entirely. Requires "
+    "--lines. Mutually exclusive with RUN_DIR.",
+)
+@click.option(
+    "--lines",
+    "lines_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Prebuilt Lines dataset (a .parquet file or a directory of parts). Used with "
+    "--points.",
+)
 @click.option("--host", default="localhost", help="Host for the web server.")
 @click.option("--port", default=5055, help="Port for the web server.")
 @click.option(
@@ -453,19 +517,58 @@ def _log_summary(r: MatchEvalBuild) -> None:
     "at lower zoom). Default 12.",
 )
 def match_eval_cli(
-    run_dir: str,
+    run_dir: str | None,
     out_dir: str | None,
     force: bool,
     build_only: bool,
+    points_path: str | None,
+    lines_path: str | None,
     host: str,
     port: int,
     lines_min_zoom: float,
 ):
-    """Build the matcher-eval Expected Format (Points + Lines) and launch the viewer.
+    """Launch the matcher-eval viewer over the Expected Format (Points + Lines).
 
-    RUN_DIR must contain candidates/, baseline/ and matches/ subfolders.
+    Two modes:
+
+    \b
+    * Build mode (default): pass RUN_DIR containing candidates/, baseline/,
+      matches/ and blocking/ subfolders; the Expected Format is built locally
+      (DuckDB) and cached, then the viewer launches.
+    * Prebuilt mode: pass --points and --lines pointing at an already-built
+      Expected Format (e.g. produced on Databricks and downloaded). The build
+      is skipped entirely; the files are loaded and the viewer launches.
     """
     apply_logging_config()
+
+    prebuilt = points_path is not None or lines_path is not None
+    if prebuilt:
+        if run_dir is not None:
+            raise click.UsageError(
+                "Pass either RUN_DIR (build mode) or --points/--lines "
+                "(prebuilt mode), not both."
+            )
+        if points_path is None or lines_path is None:
+            raise click.UsageError(
+                "Prebuilt mode requires both --points and --lines."
+            )
+        points_input = str(Path(points_path).expanduser().resolve())
+        lines_glob = _glob_for(Path(lines_path).expanduser().resolve())
+        click.echo()
+        click.echo(click.style("  Points (prebuilt): ", bold=True) + points_input)
+        click.echo(click.style("  Lines  (prebuilt): ", bold=True) + lines_glob)
+        if build_only:
+            return
+        _launch_viewer(
+            points_input, lines_glob, host=host, port=port,
+            lines_min_zoom=lines_min_zoom,
+        )
+        return
+
+    if run_dir is None:
+        raise click.UsageError(
+            "Pass RUN_DIR (build mode) or --points/--lines (prebuilt mode)."
+        )
     result = build_match_eval(run_dir, out_dir, force=force)
     click.echo()
     click.echo(click.style("  Points: ", bold=True) + result.points_path)
@@ -474,37 +577,8 @@ def match_eval_cli(
     if build_only:
         return
 
-    # Reuse the optimized GIS fast-load launch for the Points dataset, and hand
-    # the Lines parquet to the server so it loads a secondary "lines" table.
-    from .cli import _run_fast_path, _try_fast_load
-
-    fast_connection = _try_fast_load(
-        inputs=[result.points_path],
-        splits=[],
-        query=None,
-        sample=None,
-        text=None,
-        image=None,
-        audio=None,
-        vector=None,
-        x_column=None,
-        y_column=None,
-        duckdb_uri="server",
-    )
-    if fast_connection is None:
-        raise click.ClickException(
-            "Could not load the points dataset via the GIS fast path."
-        )
-    _run_fast_path(
-        fast_connection=fast_connection,
-        static=None,
-        host=host,
-        port=port,
-        enable_auto_port=True,
-        enable_mcp=False,
-        cors=None,
-        duckdb_uri="server",
-        lines_glob=result.lines_path,
+    _launch_viewer(
+        result.points_path, result.lines_path, host=host, port=port,
         lines_min_zoom=lines_min_zoom,
     )
 

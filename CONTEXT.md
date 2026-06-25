@@ -92,5 +92,9 @@ Produced two ways:
 
 ### match-eval
 
-The CLI entry point. Given a local run directory, builds the Expected Format (join +
-line construction) and launches the viewer. Given S3 in Expected Format, loads directly.
+The CLI entry point, with two modes. **Build mode**: given a local `RUN_DIR`, builds the
+Expected Format (join + line construction) and launches the viewer. **Prebuilt mode**:
+given `--points` and `--lines` pointing at an already-built Expected Format (e.g. produced
+on Databricks and downloaded — see `docs/databricks-prebuild-notebook-spec.md`), it skips
+the build and launches directly. Each prebuilt input may be a single `.parquet` file, a
+directory of parts, or a glob (multi-file parts get a globally-unique row id).

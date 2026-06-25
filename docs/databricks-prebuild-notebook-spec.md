@@ -270,22 +270,23 @@ lines.write.mode("overwrite").parquet(f"{OUT}/lines")
 
 ## 7. How geospatial atlas consumes the output
 
-After download you have local `points/` and `lines/` folders in Expected Format. The
-viewer must be launched against **prebuilt** files (skip the local DuckDB build):
+After download you have local `points/` and `lines/` folders in Expected Format. Launch
+the viewer in **prebuilt mode**, which skips the local DuckDB build entirely:
 
-- **Gap to close on the viewer side:** today `geospatial-atlas-match-eval` always *builds*
-  from raw `candidates/ baseline/ matches/ blocking/`. There is no flag yet that takes a
-  prebuilt `points/` + `lines/` and launches directly. This spec assumes a thin
-  `--prebuilt <points_glob> <lines_glob>` launch path is added (it would reuse the
-  existing `_try_fast_load` for points and `lines_glob` wiring in
-  `match_eval_cli` / `_run_fast_path`, bypassing `build_match_eval`). Track this as a
-  follow-up; it's small.
-- Until then, the manual fallback is to point the existing fast-load path at the
-  downloaded `points/**/*.parquet` and pass `lines/**/*.parquet` as the lines glob.
+```bash
+geospatial-atlas-match-eval --points ./points --lines ./lines
+```
+
+- `--points` / `--lines` each accept a single `.parquet` **file**, a **directory** of
+  parquet parts, or a glob. A Spark/Databricks partitioned `points/` folder works as-is
+  (recursively globbed) — no need to `coalesce(1)`. Across parts the loader uses a
+  globally-unique window row id, so point selection/tooltips stay correct.
+- Prebuilt mode is mutually exclusive with the `RUN_DIR` build argument; both `--points`
+  and `--lines` are required together.
 
 The column names already match the viewer's config (`longitude`/`latitude` for points;
 `lon1,lat1,lon2,lat2` + `match_pair_type` for lines; `point_class` as the category), so
-no viewer config changes are needed beyond the launch path.
+no viewer config changes are needed.
 
 ## 8. Validation cells (sanity-check before downloading)
 

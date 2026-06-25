@@ -36,6 +36,7 @@ Used by:
 from __future__ import annotations
 
 import atexit
+import glob as globlib
 import json
 import os
 import pathlib
@@ -327,6 +328,32 @@ def duckdb_literal(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+def _resolve_parquet_target(path: str) -> tuple[str, bool]:
+    """Resolve a parquet input to a ``(read_parquet target, multi_file)`` pair.
+
+    Accepts a single ``.parquet`` file, a **directory** of parquet parts (globbed
+    recursively — e.g. a Spark/Databricks ``points/`` folder or a Hive-partitioned
+    ``type=place/`` layout), or an explicit glob pattern. ``multi_file`` is True when
+    the target can span more than one file, so callers fall back to a globally-unique
+    window row id (per-file ``file_row_number`` is not unique across parts).
+    """
+    if path.startswith("hf://"):
+        return path, False
+    p = pathlib.Path(path)
+    if p.is_file():
+        return str(p), False
+    if p.is_dir():
+        target = str(p / "**" / "*.parquet")
+        if not globlib.glob(target, recursive=True):
+            raise FileNotFoundError(f"No .parquet files under directory: {path}")
+        return target, True
+    if any(ch in path for ch in "*?["):
+        if not globlib.glob(path, recursive=True):
+            raise FileNotFoundError(f"No files match glob: {path}")
+        return path, True
+    raise FileNotFoundError(path)
+
+
 def fast_load_parquet(
     path: str,
     *,
@@ -362,9 +389,12 @@ def fast_load_parquet(
     latter doesn't need an ``ST_GeomFromWKB`` wrapper.
     """
     t_start = time.perf_counter()
-    fn = pathlib.Path(path)
-    if not fn.is_file():
-        raise FileNotFoundError(path)
+    # Resolve to a read_parquet target. A single file uses the parquet
+    # reader's per-file ``file_row_number`` for a stable id; a directory or
+    # glob (e.g. a Databricks/Spark partitioned ``points/`` folder) spans many
+    # files where ``file_row_number`` is NOT unique, so those force a
+    # window-function row id instead (same fallback the frn-collision path uses).
+    read_target, multi_file = _resolve_parquet_target(path)
     if limit is not None and limit <= 0:
         limit = None
 
@@ -397,8 +427,8 @@ def fast_load_parquet(
             if enable_spatial is True:
                 raise
 
-    emit("analyze", 8.0, f"Opening {fn.name}")
-    kind, info, columns, col_types = _detect_columns(con, str(path))
+    emit("analyze", 8.0, f"Opening {pathlib.Path(path).name or path}")
+    kind, info, columns, col_types = _detect_columns(con, read_target)
 
     # Pick a stable id-column name that doesn't collide with the parquet
     # schema. We project the reader's ``file_row_number`` virtual column
@@ -409,12 +439,12 @@ def fast_load_parquet(
     # ``read_parquet(.., file_row_number=true)`` would collide on the
     # output schema. Fall back to a window-function row id in that case.
     has_frn_collision = any(c.lower() == "file_row_number" for c in columns)
-    if has_frn_collision:
-        read = f"read_parquet({duckdb_literal(str(path))})"
+    if has_frn_collision or multi_file:
+        read = f"read_parquet({duckdb_literal(read_target)})"
         id_expr = "ROW_NUMBER() OVER ()"
         passthrough = "*"
     else:
-        read = f"read_parquet({duckdb_literal(str(path))}, file_row_number=true)"
+        read = f"read_parquet({duckdb_literal(read_target)}, file_row_number=true)"
         id_expr = "file_row_number"
         # Drop the virtual column from SELECT * so we don't surface it
         # twice (once raw, once aliased).
@@ -587,7 +617,10 @@ def fast_load_parquet(
         # cast just the ENUM and GEOMETRY cols. Anything else passes
         # through unchanged.
         rewritten = list(enum_columns.keys()) + geom_columns
-        excludes = (["file_row_number"] + rewritten) if not has_frn_collision else rewritten
+        # Only EXCLUDE file_row_number when the read actually projected it
+        # (single-file, no-collision path). Multi-file uses ROW_NUMBER() instead.
+        uses_frn = not (has_frn_collision or multi_file)
+        excludes = (["file_row_number"] + rewritten) if uses_frn else rewritten
         passthrough = "* EXCLUDE (" + ", ".join(quote_ident(e) for e in excludes) + ")"
         casts = []
         for col in enum_columns:
