@@ -8,7 +8,10 @@ This is the *local* build step described in
 matcher run and writes two pre-built datasets the viewer can consume directly:
 
 - **points.parquet** — candidates ∪ baselines, one row per POI, tagged with
-  ``point_class`` and carrying every source column verbatim. Two candidate-only flags
+  ``point_class``. Memory-heavy / matcher-internal source columns (the VARCHAR[] arrays,
+  the redundant ``*_clean`` text and the dedup ``signature`` — see ``DROP_COLUMNS``) are
+  dropped so the build scales to tens of millions of POIs; the display/analysis scalars
+  are kept. Two candidate-only flags
   are added (null on baseline rows): ``history_match`` (1 if the candidate's
   ``base_ids`` is non-null, else 0) and ``blocked`` (1 if the candidate never entered
   a ``blocking`` pair — blocked out before matching — else 0). A ``cluster_size`` flag
@@ -45,7 +48,23 @@ MATCHES_DIR = "matches"
 BLOCKING_DIR = "blocking"
 
 # Version the build logic so a code change invalidates stale cached outputs.
-BUILD_VERSION = 3
+BUILD_VERSION = 4
+
+# Memory-heavy / matcher-internal source columns dropped from the Points output.
+# At real scale (tens of millions of POIs) these dominate the in-memory build and
+# the parquet size: four VARCHAR[] arrays plus the redundant cleaned-text columns
+# and the dedup signature. The display/analysis scalars are kept. ``base_ids`` is
+# dropped from the output but still read to derive ``history_match``.
+DROP_COLUMNS = [
+    "name_clean",
+    "name_clean_tokens",
+    "address_clean",
+    "address_clean_tokens",
+    "blocking_keys",
+    "signature",
+]
+# Candidate-only column: present on candidates, absent on baselines.
+DROP_COLUMNS_CANDIDATE = DROP_COLUMNS + ["base_ids"]
 
 
 @dataclass
@@ -241,11 +260,12 @@ def _run_build(
             GROUP BY pid, rt
         ),
         cand AS (
-            SELECT c.*, 'candidate' AS origin,
+            SELECT c.* EXCLUDE ({cand_excl}), 'candidate' AS origin,
                 CASE WHEN c.id IN (SELECT pid FROM matched_cand)
                      THEN 'matched_candidate' ELSE 'unmatched_candidate' END
                 AS point_class,
                 -- 1 if the candidate carries a historical base_ids link, else 0.
+                -- (base_ids itself is dropped from the output; only the flag is kept.)
                 CASE WHEN c.base_ids IS NOT NULL THEN 1 ELSE 0 END
                 AS history_match,
                 -- 1 if the candidate never entered a blocking pair (blocked out
@@ -257,7 +277,7 @@ def _run_build(
             LEFT JOIN pid_size cs ON cs.pid = c.id AND cs.rt = 'candidate'
         ),
         base AS (
-            SELECT b.*, 'baseline' AS origin,
+            SELECT b.* EXCLUDE ({base_excl}), 'baseline' AS origin,
                 CASE WHEN b.id IN (SELECT pid FROM matched_base)
                      THEN 'matched_baseline' ELSE 'unmatched_baseline' END
                 AS point_class,
@@ -268,13 +288,17 @@ def _run_build(
             FROM read_parquet($base) b
             LEFT JOIN pid_size cs ON cs.pid = b.id AND cs.rt = 'baseline'
         )
-        -- One row per POI: own columns verbatim + origin + point_class. No
-        -- per-match enrichment — a POI may have several matches, so all match
-        -- detail lives in the Lines dataset (joinable by id / base_id).
+        -- One row per POI: kept scalar columns + origin + point_class + flags.
+        -- Memory-heavy / matcher-internal columns (arrays, *_clean, signature) are
+        -- excluded; no per-match enrichment — a POI may have several matches, so all
+        -- match detail lives in the Lines dataset (joinable by id / base_id).
         SELECT * FROM cand
         UNION ALL BY NAME
         SELECT * FROM base
-        """,
+        """.format(
+            cand_excl=", ".join(DROP_COLUMNS_CANDIDATE),
+            base_excl=", ".join(DROP_COLUMNS),
+        ),
         p,
     )
 

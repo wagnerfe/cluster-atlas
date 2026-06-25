@@ -24,6 +24,13 @@ def run_dir(tmp_path):
             "latitude": [50.0, 51.0, 52.0, 53.0, 54.0, 55.0],
             # candidate-only column; null => history_match 0, non-null => 1.
             "base_ids": [["x"], None, ["y"], None, None, None],
+            # memory-heavy / matcher-internal columns that the build must drop.
+            "name_clean": ["a"] * 6,
+            "name_clean_tokens": [["a"]] * 6,
+            "address_clean": ["x"] * 6,
+            "address_clean_tokens": [["x"]] * 6,
+            "blocking_keys": [["k"]] * 6,
+            "signature": ["s"] * 6,
         }
     )
     baseline = pd.DataFrame(
@@ -32,6 +39,12 @@ def run_dir(tmp_path):
             "name": ["B", "C", "D", "E"],
             "longitude": [10.5, 11.5, 12.5, 13.5],
             "latitude": [50.5, 51.5, 52.5, 53.5],
+            "name_clean": ["b"] * 4,
+            "name_clean_tokens": [["b"]] * 4,
+            "address_clean": ["y"] * 4,
+            "address_clean_tokens": [["y"]] * 4,
+            "blocking_keys": [["k"]] * 4,
+            "signature": ["t"] * 4,
         }
     )
     matches = pd.DataFrame(
@@ -125,6 +138,20 @@ def test_points_one_row_per_poi(run_dir, tmp_path):
     assert "composite_score" not in cols and "match_sub_type" not in cols
     assert "history_match" in cols and "blocked" in cols
     assert "cluster_size" in cols
+    # memory-heavy / matcher-internal columns are dropped from the output.
+    for dropped in (
+        "name_clean",
+        "name_clean_tokens",
+        "address_clean",
+        "address_clean_tokens",
+        "blocking_keys",
+        "signature",
+        "base_ids",
+    ):
+        assert dropped not in cols
+    # kept scalars still present.
+    assert "name" in cols and "address" not in cols  # address absent in fixture
+    assert "latitude" in cols and "longitude" in cols
 
     # cluster_size = matches per base_id, assigned to every cluster member (max
     # over clusters a record belongs to); null for unmatched points.

@@ -58,9 +58,12 @@ dataset. The viewer never joins at view time — it only loads these. Each datas
 partitioned, e.g. `type=place/…`); the loader globs `**/*.parquet`.
 
 - **Points dataset**: candidates ∪ baselines, exactly one row per POI, tagged with
-  Point class and an `origin` (candidate/baseline), carrying **all** its own source
-  columns verbatim (including matcher internals — `*_clean`, token arrays,
-  `blocking_keys`, `signature`). **No match enrichment** is denormalized onto points: a
+  Point class and an `origin` (candidate/baseline), carrying its display/analysis scalar
+  columns. The **memory-heavy / matcher-internal columns are dropped** — the VARCHAR[]
+  arrays (`*_clean_tokens`, `blocking_keys`, `base_ids`), the redundant `*_clean` text
+  and the dedup `signature` — so the build scales to tens of millions of POIs (these
+  arrays otherwise dominate both build memory and output size). **No match enrichment**
+  is denormalized onto points: a
   POI may participate in several matches, so all match detail lives in the Lines dataset
   (joinable by `id`/`base_id`). The union is schema-aligned: columns absent on one side
   are null-filled. A point is displayed as-is; the line carries the match information.
