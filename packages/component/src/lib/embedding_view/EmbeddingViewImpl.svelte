@@ -464,7 +464,7 @@
     return downsampleDensityWeight;
   });
   let mapStyle = $derived(
-    isGis ? (config?.mapStyle !== undefined ? config.mapStyle : "https://tiles.openfreemap.org/styles/liberty") : null,
+    isGis ? (config?.mapStyle !== undefined ? config.mapStyle : "https://tiles.openfreemap.org/styles/positron") : null,
   );
   let basemapAttribution = $derived(
     typeof mapStyle === "string" && mapStyle.toLowerCase().includes("openfreemap")
