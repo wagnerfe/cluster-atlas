@@ -1,7 +1,7 @@
 <!-- Copyright (c) 2025 Apple Inc. Licensed under MIT License. -->
 <script module lang="ts">
   import { maxDensityModeCategories, type DataPoint, type ViewportState } from "@embedding-atlas/component";
-  import { type Coordinator } from "@uwdata/mosaic-core";
+  import { MosaicClient, type Coordinator } from "@uwdata/mosaic-core";
   import * as SQL from "@uwdata/mosaic-sql";
 
   import Overlay from "./Overlay.svelte";
@@ -66,6 +66,12 @@
     { key: "baseline->baseline", label: "Baseline → Baseline", color: "#1f77b4" },
   ];
 
+  // Cluster filtering (matcher-eval): clicking a point publishes a
+  // ``cluster_id IN (…)`` clause to the global cross-filter so only that
+  // point's cluster stays visible (and, since the Match-Lines client reads the
+  // same filter, only that cluster's lines draw). Clicking empty map clears it.
+  const CLUSTER_FILTER_COLUMN = "cluster_id";
+
   let {
     context,
     width,
@@ -111,6 +117,50 @@
   let matchLinesEnabled = $state(true);
   let visibleMatchLineTypes = $state<string[]>(MATCH_LINE_TYPES.map((t) => t.key));
   let effectiveVisibleLineTypes = $derived(matchLinesEnabled ? visibleMatchLineTypes : []);
+
+  // Cluster filtering — only in matcher-eval views (lines present) that carry a
+  // ``cluster_id`` column. Its own source identity in the cross-filter so the
+  // clause replaces itself on each click; the scatter and lines clients are
+  // distinct sources, so they DO filter to it.
+  const clusterFilterClient = new MosaicClient();
+  let clusterFilterEnabled = $derived(
+    spec.data.lines != null && context.columns.some((c) => c.name === CLUSTER_FILTER_COLUMN),
+  );
+
+  function publishClusterClause(predicate: any, value: any) {
+    context.filter.update({
+      source: clusterFilterClient,
+      clients: new Set([clusterFilterClient]),
+      predicate,
+      value,
+    });
+  }
+
+  // Map click → cluster filter. ``points`` is the clicked selection (empty when
+  // the click missed every point, which clears the filter). Multi-select
+  // (shift/⌘-click) unions the clusters.
+  function updateClusterFilter(points: DataPoint[] | null) {
+    if (!clusterFilterEnabled) {
+      return;
+    }
+    let ids = (points ?? []).map((p) => p?.fields?.[CLUSTER_FILTER_COLUMN]).filter((v) => v != null);
+    let distinct = Array.from(new Set(ids));
+    if (distinct.length == 0) {
+      publishClusterClause(null, null);
+    } else {
+      publishClusterClause(
+        SQL.isIn(
+          SQL.column(CLUSTER_FILTER_COLUMN),
+          distinct.map((v) => SQL.literal(v)),
+        ),
+        distinct,
+      );
+    }
+  }
+
+  // Drop our clause when the chart unmounts so a stale cluster filter doesn't
+  // outlive the view.
+  $effect(() => () => publishClusterClause(null, null));
 
   // Update the category mapping and legend.
   $effect.pre(() => {
@@ -291,6 +341,7 @@
     onSelection={(points) => {
       selection = points;
       highlightStore.set(points?.map((p) => p.identifier) ?? null);
+      updateClusterFilter(points);
     }}
   />
   <div class="absolute top-0 left-0 right-0 flex flex-wrap justify-between items-start pointer-events-none z-10">

@@ -93,6 +93,7 @@ Exact output columns, in this spirit (order not significant):
 | `history_match` | int | candidate-only; **null on baseline rows** |
 | `blocked` | int | candidate-only; **null on baseline rows** |
 | `cluster_size` | int | candidates **and** baselines; **null when unmatched** |
+| `cluster_id` | string | the `matches.cluster_id` of the row's cluster, on candidates **and** baselines; **null when unmatched**. Drives click-to-filter in the viewer (clicking a point hides everything outside its `cluster_id`), so the column name must be exactly `cluster_id`. |
 
 **Dropped** memory-heavy / matcher-internal source columns (must NOT appear in output):
 `name_clean, name_clean_tokens, address_clean, address_clean_tokens, blocking_keys,
