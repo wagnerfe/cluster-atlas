@@ -120,12 +120,19 @@
 
   // Cluster filtering — only in matcher-eval views (lines present) that carry a
   // ``cluster_id`` column. Its own source identity in the cross-filter so the
-  // clause replaces itself on each click; the scatter and lines clients are
-  // distinct sources, so they DO filter to it.
+  // clause replaces itself on each click; the scatter, lines, and table clients
+  // are distinct sources, so they all filter to it.
   const clusterFilterClient = new MosaicClient();
   let clusterFilterEnabled = $derived(
     spec.data.lines != null && context.columns.some((c) => c.name === CLUSTER_FILTER_COLUMN),
   );
+  // The cluster id(s) currently filtered to (null = show all). Held as state so
+  // the actual context.filter mutation happens in the reactive effect below, at
+  // a clean tick — NOT synchronously inside onSelection. Updating the Selection
+  // re-entrantly from that callback (it fires during the data client's
+  // queryResult cascade) made the table miss the first click; publishing from a
+  // $effect.pre is the same pattern Legend.svelte uses, and it is reliable.
+  let clusterFilterIds = $state.raw<any[] | null>(null);
 
   function publishClusterClause(predicate: any, value: any) {
     context.filter.update({
@@ -136,30 +143,51 @@
     });
   }
 
-  // Map click → cluster filter. ``points`` is the clicked selection (empty when
-  // the click missed every point, which clears the filter). Multi-select
-  // (shift/⌘-click) unions the clusters.
+  // Map click → cluster filter target. ``points`` distinguishes:
+  //   - ``null``  → a programmatic reset. The data client clears the highlight
+  //     after EVERY re-query, including the one our own filter triggers, so a
+  //     ``null`` here is NOT a user action. Ignore it — otherwise the filter
+  //     would clear itself the instant it took effect (points flash then return).
+  //   - ``[]``    → the user clicked empty map. Clear the filter (show all).
+  //   - [p, …]    → the user clicked point(s); filter to their cluster(s).
+  //     Multi-select (shift/⌘-click) unions the clusters. Points with no
+  //     cluster_id (unmatched) leave the current target unchanged.
   function updateClusterFilter(points: DataPoint[] | null) {
-    if (!clusterFilterEnabled) {
+    if (!clusterFilterEnabled || points == null) {
       return;
     }
-    let ids = (points ?? []).map((p) => p?.fields?.[CLUSTER_FILTER_COLUMN]).filter((v) => v != null);
+    if (points.length == 0) {
+      clusterFilterIds = null;
+      return;
+    }
+    let ids = points.map((p) => p?.fields?.[CLUSTER_FILTER_COLUMN]).filter((v) => v != null);
     let distinct = Array.from(new Set(ids));
-    if (distinct.length == 0) {
-      publishClusterClause(null, null);
-    } else {
-      publishClusterClause(
-        SQL.isIn(
-          SQL.column(CLUSTER_FILTER_COLUMN),
-          distinct.map((v) => SQL.literal(v)),
-        ),
-        distinct,
-      );
+    if (distinct.length > 0) {
+      clusterFilterIds = distinct;
     }
   }
 
-  // Drop our clause when the chart unmounts so a stale cluster filter doesn't
-  // outlive the view.
+  // Mirror clusterFilterIds onto context.filter reactively (re-runs only when the
+  // target changes; updating the same source replaces its clause in place).
+  $effect.pre(() => {
+    if (!clusterFilterEnabled) {
+      return;
+    }
+    let ids = clusterFilterIds;
+    if (ids != null && ids.length > 0) {
+      publishClusterClause(
+        SQL.isIn(
+          SQL.column(CLUSTER_FILTER_COLUMN),
+          ids.map((v) => SQL.literal(v)),
+        ),
+        ids,
+      );
+    } else {
+      publishClusterClause(null, null);
+    }
+  });
+
+  // Drop the clause on unmount so a stale cluster filter doesn't outlive the view.
   $effect(() => () => publishClusterClause(null, null));
 
   // Update the category mapping and legend.
