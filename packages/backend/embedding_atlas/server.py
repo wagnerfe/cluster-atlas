@@ -477,6 +477,14 @@ def make_server(
         assert duckdb_connection is not None
         predicate = query.get("predicate", None)
         format = query["format"]
+        # Source table to export. Defaults to the main dataset; the cluster
+        # basket feature passes its own accumulator table. Validate as a plain
+        # identifier so it is safe to interpolate into the COPY statement.
+        table = query.get("table", "dataset")
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+            return JSONResponse(
+                {"error": f"invalid table name: {table!r}"}, status_code=400
+            )
         formats = {
             "json": "(FORMAT JSON, ARRAY true)",
             "jsonl": "(FORMAT JSON)",
@@ -488,10 +496,10 @@ def make_server(
             try:
                 if predicate is not None:
                     cursor.execute(
-                        f"COPY (SELECT * FROM dataset WHERE {predicate}) TO '{filename}' {formats[format]}"
+                        f"COPY (SELECT * FROM {table} WHERE {predicate}) TO '{filename}' {formats[format]}"
                     )
                 else:
-                    cursor.execute(f"COPY dataset TO '{filename}' {formats[format]}")
+                    cursor.execute(f"COPY {table} TO '{filename}' {formats[format]}")
                 with open(filename, "rb") as f:
                     buffer = f.read()
                     return Response(
