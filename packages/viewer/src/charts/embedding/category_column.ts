@@ -10,6 +10,20 @@ import { inferBinning, inferTimeBinning, type Binning } from "../common/binning.
 import { inferNumberFormatter, inferTimeFormatter } from "../common/formatter.js";
 import { type ChartTheme } from "../common/theme.js";
 
+/**
+ * Fixed colors for the matcher-eval ``point_class`` enum. The default palette
+ * is assigned in descending row-count order, which shuffles per dataset; this
+ * map pins each class to a stable swatch. The Match-Lines palette in
+ * EmbeddingViewImpl mirrors these (matched_candidate green ~ candidate->baseline,
+ * matched_baseline blue ~ baseline->baseline).
+ */
+const POINT_CLASS_COLORS: Record<string, string> = {
+  matched_baseline: "#1f77b4", // blue
+  matched_candidate: "#2ca02c", // green
+  unmatched_baseline: "#aec7e8", // light blue
+  unmatched_candidate: "#d62728", // red
+};
+
 export interface EmbeddingLegend {
   indexColumn: string;
   legend: {
@@ -114,7 +128,7 @@ async function makeDiscreteCategoryColumn(
 
   let legend: EmbeddingLegend["legend"] = values.map(({ value }, i) => ({
     label: value,
-    color: colors[i],
+    color: (column === "point_class" ? POINT_CLASS_COLORS[value] : undefined) ?? colors[i],
     predicate: SQL.eq(SQL.cast(SQL.column(column), "TEXT"), SQL.literal(value)),
     count: countMap.get(i) ?? 0,
   }));

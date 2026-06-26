@@ -62,8 +62,8 @@
   // Match-Lines (matcher-eval) pair types, colors mirror the renderer.
   const MATCH_LINE_TYPES = [
     { key: "candidate->baseline", label: "Candidate → Baseline", color: "#2ca02c" },
-    { key: "candidate->candidate", label: "Candidate → Candidate", color: "#ff7f0e" },
-    { key: "baseline->baseline", label: "Baseline → Baseline", color: "#9467bd" },
+    { key: "candidate->candidate", label: "Candidate → Candidate", color: "#98df8a" },
+    { key: "baseline->baseline", label: "Baseline → Baseline", color: "#1f77b4" },
   ];
 
   let {

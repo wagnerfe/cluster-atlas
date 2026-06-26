@@ -1013,10 +1013,14 @@
   // are <=400 m, hence sub-pixel below `minZoom`; we only query the viewport's
   // worth above it. ADR-0001.
   const LINES_MIN_ZOOM_DEFAULT = 12;
+  // Match-Lines are colored by their endpoint pair type to mirror the point
+  // `point_class` palette (see makeCategoryColumn): a candidate->baseline match
+  // reads the same green as a matched_candidate point, baseline->baseline the
+  // same blue as matched_baseline, and candidate->candidate a lighter green.
   const LINE_COLORS: Record<string, string> = {
-    "candidate->baseline": "#2ca02c",
-    "candidate->candidate": "#ff7f0e",
-    "baseline->baseline": "#9467bd",
+    "candidate->baseline": "#2ca02c", // green
+    "candidate->candidate": "#98df8a", // light green
+    "baseline->baseline": "#1f77b4", // blue
   };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
