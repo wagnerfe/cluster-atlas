@@ -12,6 +12,59 @@ You can load the data from a remote URL too! Clicking this link, you download 10
 
 [LinkedIn Post for more context](https://www.linkedin.com/posts/dominik-weckm%C3%BCller_geospatial-atlas-is-born-explore-100m-points-activity-7411826555179429890-CiHX)
 
+## Inspecting match outputs (the main use case)
+
+The primary aim of this fork is **visual inspection of matcher outputs** — the
+candidate↔baseline links produced by an entity-matching run. A dedicated viewer
+mode (`match-eval`) renders every POI colored by its **match class** and draws a
+**Match Line** between each matched pair, so you can eyeball where the matcher
+agrees, disagrees, and how clusters form.
+
+What you see on the map:
+
+- **Four point classes** — Matched Candidate, Unmatched Candidate, Matched
+  Baseline, Unmatched Baseline — each in a distinct color.
+- **Match Lines** connecting matched pairs, colored by pair type
+  (candidate→baseline, candidate→candidate, baseline→baseline), with master and
+  per-pair-type show/hide toggles. Lines are short, so they appear once you zoom
+  in past a threshold.
+- **Cluster inspection** — click any point to cross-filter the map *and* table to
+  its whole match cluster; collect `id`/`base_id` pairs into a **cluster basket**
+  and export them to parquet for downstream review.
+
+The viewer consumes a pre-built **Expected Format** (a Points dataset + a Lines
+dataset) and never joins at view time — this decoupling is what lets it scale to
+tens of millions of matches. See [`CONTEXT.md`](CONTEXT.md) for the glossary and
+[`docs/adr/`](docs/adr/) for the design decisions.
+
+### Run it
+
+**Build mode** — build the Expected Format from a local run directory containing
+`candidates/`, `baseline/`, `matches/` and `blocking/` subfolders (DuckDB builds
+and caches Points + Lines, then launches the viewer):
+
+```bash
+uv --directory packages/backend run geospatial-atlas-match-eval /path/to/RUN_DIR
+```
+
+**Prebuilt mode** — point at an already-built Expected Format (e.g. produced on
+Databricks and downloaded, see
+[`docs/databricks-prebuild-notebook-spec.md`](docs/databricks-prebuild-notebook-spec.md)).
+Each of `--points`/`--lines` may be a single `.parquet`, a directory of parts, or
+a glob:
+
+```bash
+uv --directory packages/backend run geospatial-atlas-match-eval \
+  --points /path/to/points/ --lines /path/to/lines/
+```
+
+Useful flags: `--build-only` (build the Expected Format and exit), `--force`
+(rebuild even if a valid cache exists), `--lines-min-zoom` (zoom threshold below
+which Match Lines are hidden), `--port` / `--host`.
+
+For exploring an arbitrary point dataset (without match inspection), use the
+plain `geospatial-atlas` command described under [Usage](#usage-after-installation-above).
+
 ## Desktop App Download
 
 All links below resolve to the [latest tagged release](https://github.com/do-me/geospatial-atlas/releases/latest). See the [CHANGELOG](CHANGELOG.md) for what's in each version. All bundles are **unsigned**, so every platform needs a one-off bypass step after install — shown per-row below.
