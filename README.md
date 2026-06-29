@@ -1,8 +1,6 @@
-# Geospatial Atlas
+# Cluster Atlas
 
-[![DOI](https://zenodo.org/badge/1125307298.svg)](https://doi.org/10.5281/zenodo.19745397)
-
-This is a fork of [Embedding Atlas](https://apple.github.io/embedding-atlas) adapted for geospatial data. As embeddings or rather their 2D projections share the exact same visualization challenges like 2D geospatial data, Embedding Atlas and all its functionality serve a great deal in geospatial data exploration!
+This is a fork of [Embedding Atlas](https://apple.github.io/embedding-atlas) and [Geospatial Atlas](https://github.com/do-me/geospatial-atlas) adapted for match-cluster analysis. 
 
 ## Inspecting match outputs (the main use case)
 
