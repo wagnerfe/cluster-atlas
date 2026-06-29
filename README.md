@@ -4,14 +4,6 @@
 
 This is a fork of [Embedding Atlas](https://apple.github.io/embedding-atlas) adapted for geospatial data. As embeddings or rather their 2D projections share the exact same visualization challenges like 2D geospatial data, Embedding Atlas and all its functionality serve a great deal in geospatial data exploration!
 
-**Verified at 322 M points** in the desktop app on a 32 GB Apple Silicon laptop, **~100 M** in a vanilla browser tab (Chrome / Safari / Firefox-with-flag). For the full optimization journey see [docs/optimization_history.md](docs/optimization_history.md) and [docs/PERF-75M.md](docs/PERF-75M.md). Browser-side scale ceilings and the V8-flag workaround for the 322 M case are documented in [Troubleshooting](#troubleshooting) below.
-
-Find various example apps [here](https://github.com/do-me/geospatial-atlas-apps). Try for example the [6M GlobalGeoTree explorer](https://do-me.github.io/geospatial-atlas-apps/GlobalGeoTree/)! Load your own data (up to around 6M points) here: https://do-me.github.io/geospatial-atlas/app/!
-
-You can load the data from a remote URL too! Clicking this link, you download 100Mb of geolocated Wikipedia articles: https://do-me.github.io/geospatial-atlas/app/#?data=https://pub-016504dd3a4d419a9c17a8939840935e.r2.dev/v1/wikipedia_geotagged.parquet
-
-[LinkedIn Post for more context](https://www.linkedin.com/posts/dominik-weckm%C3%BCller_geospatial-atlas-is-born-explore-100m-points-activity-7411826555179429890-CiHX)
-
 ## Inspecting match outputs (the main use case)
 
 The primary aim of this fork is **visual inspection of matcher outputs** — the
@@ -19,6 +11,8 @@ candidate↔baseline links produced by an entity-matching run. A dedicated viewe
 mode (`match-eval`) renders every POI colored by its **match class** and draws a
 **Match Line** between each matched pair, so you can eyeball where the matcher
 agrees, disagrees, and how clusters form.
+
+![Match-eval viewer: points colored by class, Match Lines between matched pairs, side panel of cross-filterable columns](screenshots/match-eval-overview.png)
 
 What you see on the map:
 
@@ -28,14 +22,67 @@ What you see on the map:
   (candidate→baseline, candidate→candidate, baseline→baseline), with master and
   per-pair-type show/hide toggles. Lines are short, so they appear once you zoom
   in past a threshold.
-- **Cluster inspection** — click any point to cross-filter the map *and* table to
-  its whole match cluster; collect `id`/`base_id` pairs into a **cluster basket**
-  and export them to parquet for downstream review.
 
 The viewer consumes a pre-built **Expected Format** (a Points dataset + a Lines
 dataset) and never joins at view time — this decoupling is what lets it scale to
 tens of millions of matches. See [`CONTEXT.md`](CONTEXT.md) for the glossary and
 [`docs/adr/`](docs/adr/) for the design decisions.
+
+### General inspection
+
+Everything is wired through a single **cross-filter**: select on any view and
+every other view narrows to match. Brush a histogram, toggle a class in the
+**legend**, draw a bounding box on the map, or search by name (full-text and, when
+indexed, vector / nearest-neighbor) — the map, the Match Lines, and the table all
+reduce to the same subset in lockstep, with a live filtered count and a one-click
+**Reset filter**.
+
+For anything the built-in widgets can't express, open **+ Add Predicate** and type
+a raw **SQL `WHERE` clause** against the Points table (the editor autocompletes
+table and column names). Name it and it joins the cross-filter like any other
+clause, so you can stack `composite_score < 0.4`, `point_class = 'Unmatched
+Candidate'`, `cluster_size > 5`, and a map box together. Every column from the
+Expected Format is queryable, and the same SQL surface is exposed to LLM agents via
+the MCP `run_sql_query` tool (see [Connect an LLM agent](#connect-an-llm-agent-claude-desktop-cursor-)).
+
+### Inspecting clusters
+
+A match **cluster** is the set of records sharing a `base_id` — one baseline and
+every candidate matched against it (plus candidate↔candidate / baseline↔baseline
+links). To inspect one, **click any point**: the viewer publishes a
+`cluster_id IN (…)` clause to the global cross-filter, so the map hides every point
+outside that cluster, only the cluster's Match Lines remain drawn, and the table
+scrolls to exactly its rows — all on the first click. **Shift / ⌘-click** unions
+several clusters into the selection; clicking empty map clears it.
+
+<p>
+  <img src="screenshots/cluster-filter-before.png" width="49%" alt="Before: full 39M-point dataset" />
+  <img src="screenshots/cluster-filter-after.png" width="49%" alt="After clicking a point: filtered to that point's 32-row cluster" />
+</p>
+
+*Before (left): the full 39 M-point dataset. After (right): one click filters the
+map, Match Lines, table, and every side-panel chart down to the clicked point's
+cluster (here 32 rows).*
+
+This works because `cluster_id` ships as a column on the prebuilt Points dataset
+and the click-to-filter is gated to matcher-eval views that carry it, so it no-ops
+on generic point datasets. It is a fast way to answer "what else got pulled into
+this match?" without writing any SQL.
+
+### Downloading clusters as example cases
+
+Selected clusters can be set aside as a labeled corpus of example cases. With a
+cluster filtered (via click-to-filter above), a **cluster basket** appears over the
+table: click **Add cluster** to accumulate that cluster's `id`↔`base_id` pairs into
+a server-side `__cluster_basket` DuckDB table (read from the Lines dataset, scoped
+to the active filter, deduped on `(id, base_id)`). Repeat across as many clusters
+as you like — the basket is a real table on the shared connection, so the running
+count is plain SQL and it survives a page reload within the session.
+
+When done, **Download** exports the whole basket as `cluster-basket.parquet` (via
+the same COPY-to-parquet endpoint the selection export uses), or **Clear** empties
+it. The result is a compact parquet of hand-picked match clusters — ideal as
+regression fixtures, hard-case examples, or a review queue for downstream work.
 
 ### Run it
 
