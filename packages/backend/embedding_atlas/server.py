@@ -378,8 +378,18 @@ def make_server(
 
     def handle_query(query: dict):
         assert duckdb_connection is not None
-        sql = query["sql"]
+        sql = query.get("sql")
         command = query["type"]
+        # A malformed message (``sql`` missing or ``null``) must not crash the
+        # handler before the try/except below: both the ``debug_sql`` preview
+        # (``sql.replace``) and the read-only cache check (``_READONLY_RE.match``)
+        # raise ``TypeError`` on a non-string. Return the same graceful error
+        # envelope every other bad query gets instead.
+        if not isinstance(sql, str):
+            return JSONResponse(
+                {"error": f"query 'sql' must be a string, got {type(sql).__name__}"},
+                status_code=400,
+            )
         t_start = time.perf_counter() if debug_sql else 0.0
         if debug_sql:
             preview = sql.replace("\n", " ")
