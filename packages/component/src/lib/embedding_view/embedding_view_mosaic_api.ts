@@ -93,6 +93,11 @@ export interface EmbeddingViewMosaicProps {
    *  If you have categories represented as strings, you should first convert them to 0-indexed integers. */
   category?: string | null;
 
+  /** The name of a 0/1 survivor flag column (matcher-eval).
+   *  Points with value 1 are drawn with a light-red outer ring
+   *  (1/10 of the point radius). Requires `category` to be set. */
+  survivor?: string | null;
+
   /** The name of the text column.
    *  If specified, the default tooltip shows the text content.
    *  The text content is also used to generate labels automatically. */

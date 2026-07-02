@@ -614,6 +614,7 @@
       category: data.category,
       categoryCount,
       categoryColors: resolvedCategoryColors,
+      survivorRingWidth: config?.survivorRingWidth ?? 0.1,
       downsampleMaxPoints: effectiveDownsampleMaxPoints,
       downsampleDensityWeight: effectiveDownsampleDensityWeight,
       // Reuse the last compacted set for the entire duration of an

@@ -35,6 +35,7 @@ struct Uniforms {
   quantization_step: f32,
   density_alpha: f32,
   contours_alpha: f32,
+  survivor_ring_width: f32,
   matrix: mat3x3<f32>,
   view_xy_scaler: vec2<f32>,
   kde_causal: vec4<f32>,
@@ -60,6 +61,7 @@ struct DownsampleUniforms {
 struct PointData {
   position: vec3<f32>,
   category: u32,
+  survivor: u32,
 }
 
 struct FragmentOutput {
@@ -107,9 +109,14 @@ fn get_point(index: u32) -> PointData {
   var result: PointData;
   result.position = vec3(x_buffer[index], y_buffer[index], 1.0);
   if (uniforms.category_count > 1) {
-    result.category = (category_buffer[index >> 2] >> ((index & 3) << 3)) & 0xff;
+    // Byte layout: bit 7 = survivor flag, bits 0-6 = category index
+    // (packed host-side in EmbeddingViewMosaic to avoid a 4th storage buffer).
+    let byte = (category_buffer[index >> 2] >> ((index & 3) << 3)) & 0xff;
+    result.category = byte & 0x7f;
+    result.survivor = byte >> 7;
   } else {
     result.category = 0;
+    result.survivor = 0;
   }
   return result;
 }
@@ -159,7 +166,12 @@ struct PointsVertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) dp: vec3<f32>,
   @location(1) color: vec4<f32>,
+  // survivor flag premultiplied by point alpha (0 = no ring)
+  @location(2) survivor: f32,
 }
+
+// Light-red ring drawn on survivor points (premultiplied by survivor alpha).
+const SURVIVOR_RING_COLOR: vec4<f32> = vec4<f32>(1.0, 0.35, 0.35, 1.0);
 
 @vertex
 fn points_vs(
@@ -173,19 +185,30 @@ fn points_vs(
   let pos = uniforms.matrix * point.position;
 
   var out: PointsVertexOutput;
-  out.position = vec4<f32>(pos.xy + dp * uniforms.point_size / framebuffer_size * 2.0, 0.0, 1.0);
-  out.dp = vec3(dp, uniforms.point_size);
+  // Survivor quads expand by the ring width so the ring sits OUTSIDE the disc.
+  let expand = 1.0 + uniforms.survivor_ring_width * f32(point.survivor);
+  out.position = vec4<f32>(pos.xy + dp * uniforms.point_size * expand / framebuffer_size * 2.0, 0.0, 1.0);
+  out.dp = vec3(dp * expand, uniforms.point_size);
   out.color = uniforms.category_colors[point.category] * alpha;
+  out.survivor = f32(point.survivor) * alpha;
   return out;
 }
 
 @fragment
 fn points_fs(in: PointsVertexOutput) -> FragmentOutput {
   let r = length(in.dp.xy) * in.dp.z;
-  let a = max(0.0, min(1.0, in.dp.z - r));
+  let disc_a = max(0.0, min(1.0, in.dp.z - r));
+  var color = in.color * disc_a;
+  if (in.survivor > 0.0 && uniforms.survivor_ring_width > 0.0) {
+    // Ring spans [disc edge, disc edge * (1 + width)], 1px antialiased on both
+    // edges; (1 - disc_a) keeps the AA seam against the disc additive-free.
+    let ring_outer = in.dp.z * (1.0 + uniforms.survivor_ring_width);
+    let ring_a = max(0.0, min(1.0, min(r - in.dp.z + 1.0, ring_outer - r)));
+    color += SURVIVOR_RING_COLOR * in.survivor * ring_a * (1.0 - disc_a);
+  }
   var out: FragmentOutput;
-  out.color = in.color * a;
-  out.log1malpha = log(1 - out.color.a);
+  out.color = color;
+  out.log1malpha = log(1 - color.a);
   return out;
 }
 
@@ -632,9 +655,11 @@ fn points_downsampled_vs(
   let dp = vec2<f32>(f32(part % 2), f32(part / 2)) * 2.0 - 1.0;
   let point = get_point(instance);
   let pos = uniforms.matrix * point.position;
-  out.position = vec4<f32>(pos.xy + dp * uniforms.point_size / framebuffer_size * 2.0, 0.0, 1.0);
-  out.dp = vec3(dp, uniforms.point_size);
+  let expand = 1.0 + uniforms.survivor_ring_width * f32(point.survivor);
+  out.position = vec4<f32>(pos.xy + dp * uniforms.point_size * expand / framebuffer_size * 2.0, 0.0, 1.0);
+  out.dp = vec3(dp * expand, uniforms.point_size);
   out.color = uniforms.category_colors[point.category] * alpha;
+  out.survivor = f32(point.survivor) * alpha;
   return out;
 }
 
@@ -727,8 +752,10 @@ fn points_compacted_vs(
   let point = get_point(real_index);
   let pos = uniforms.matrix * point.position;
   var out: PointsVertexOutput;
-  out.position = vec4<f32>(pos.xy + dp * uniforms.point_size / framebuffer_size * 2.0, 0.0, 1.0);
-  out.dp = vec3(dp, uniforms.point_size);
+  let expand = 1.0 + uniforms.survivor_ring_width * f32(point.survivor);
+  out.position = vec4<f32>(pos.xy + dp * uniforms.point_size * expand / framebuffer_size * 2.0, 0.0, 1.0);
+  out.dp = vec3(dp * expand, uniforms.point_size);
   out.color = uniforms.category_colors[point.category] * alpha;
+  out.survivor = f32(point.survivor) * alpha;
   return out;
 }

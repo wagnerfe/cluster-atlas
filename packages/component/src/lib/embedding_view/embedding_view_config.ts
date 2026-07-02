@@ -15,6 +15,10 @@ export interface EmbeddingViewConfig {
    * If not specified, point size is calculated based on density. */
   pointSize?: number | null;
 
+  /** Width of the survivor ring as a fraction of the point radius (0.1–1).
+   * The ring extends outward beyond the point circle. Default 0.1. */
+  survivorRingWidth?: number | null;
+
   /** Generate labels automatically.
    * By default labels are generated automatically if the `labels` prop is not specified,
    * and a `text` column is specified in the Mosaic view,

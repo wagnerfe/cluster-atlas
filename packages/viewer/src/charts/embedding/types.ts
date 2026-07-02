@@ -50,6 +50,8 @@ export interface EmbeddingSpec {
   mapStyle?: string | null;
   minimumDensity?: number;
   pointSize?: number;
+  /** Survivor ring width as a fraction of the point radius (0.1–1). Default: 0.1. */
+  survivorRingWidth?: number;
   /** Maximum number of points to render (for downsampling). Default: 4000000. Set to null to disable. */
   downsampleMaxPoints?: number | null;
   /** Max points rendered while the user is actively zooming/panning. Default: 200000. */

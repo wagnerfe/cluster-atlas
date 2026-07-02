@@ -19,6 +19,7 @@ export interface Uniforms {
   quantization_step: number;
   density_alpha: number;
   contours_alpha: number;
+  survivor_ring_width: number;
   matrix: Matrix3;
   view_xy_scaler: Vector2;
   kde_causal: Vector4;
@@ -129,6 +130,7 @@ export function makeModuleUniforms(df: Dataflow, device: Node<GPUDevice>): Modul
       writer.f32(uniforms.quantization_step);
       writer.f32(uniforms.density_alpha);
       writer.f32(uniforms.contours_alpha);
+      writer.f32(uniforms.survivor_ring_width);
       writer.mat3x3f(uniforms.matrix);
       writer.vec2f(...uniforms.view_xy_scaler);
       writer.vec4f(...uniforms.kde_causal);
