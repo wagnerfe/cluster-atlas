@@ -65,6 +65,13 @@
     { key: "candidate->candidate", label: "Candidate → Candidate", color: "#98df8a" },
     { key: "baseline->baseline", label: "Baseline → Baseline", color: "#1f77b4" },
   ];
+  // Run-comparison datasets color lines by `line_status` instead (the backend
+  // sets pairType to that column when the lines parquet carries it).
+  const DIFF_LINE_TYPES = [
+    { key: "added", label: "Added (new run only)", color: "#2ca02c" },
+    { key: "removed", label: "Removed (old run only)", color: "#d62728" },
+    { key: "stable", label: "Stable (both runs)", color: "#b5b5b5" },
+  ];
 
   // Cluster filtering (matcher-eval): clicking a point publishes a
   // ``cluster_id IN (…)`` clause to the global cross-filter so only that
@@ -114,8 +121,16 @@
   });
 
   // Match-Lines visibility (matcher-eval). Master toggle + per-pair-type.
+  let matchLineTypes = $derived(
+    spec.data.lines?.pairType === "line_status" ? DIFF_LINE_TYPES : MATCH_LINE_TYPES,
+  );
   let matchLinesEnabled = $state(true);
-  let visibleMatchLineTypes = $state<string[]>(MATCH_LINE_TYPES.map((t) => t.key));
+  // svelte-ignore state_referenced_locally
+  let visibleMatchLineTypes = $state<string[]>(
+    (spec.data.lines?.pairType === "line_status" ? DIFF_LINE_TYPES : MATCH_LINE_TYPES).map(
+      (t) => t.key,
+    ),
+  );
   let effectiveVisibleLineTypes = $derived(matchLinesEnabled ? visibleMatchLineTypes : []);
 
   // Cluster filtering — only in matcher-eval views (lines present) that carry a
@@ -448,7 +463,7 @@
               <div class="text-slate-500 dark:text-slate-400 select-none">Match Lines</div>
               <Switch label="Show" value={matchLinesEnabled} onChange={(v) => (matchLinesEnabled = v)} />
             </div>
-            {#each MATCH_LINE_TYPES as t}
+            {#each matchLineTypes as t}
               <div class="flex items-center justify-between" class:opacity-50={!matchLinesEnabled}>
                 <div class="flex items-center gap-2">
                   <span style="display:inline-block;width:14px;height:3px;border-radius:2px;background:{t.color}"

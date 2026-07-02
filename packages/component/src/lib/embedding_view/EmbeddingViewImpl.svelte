@@ -1018,10 +1018,15 @@
   // `point_class` palette (see makeCategoryColumn): a candidate->baseline match
   // reads the same green as a matched_candidate point, baseline->baseline the
   // same blue as matched_baseline, and candidate->candidate a lighter green.
+  // Run-comparison datasets color by `line_status` instead: added (green) /
+  // removed (red) mirror the delta_class gain/loss hues; stable is gray.
   const LINE_COLORS: Record<string, string> = {
     "candidate->baseline": "#2ca02c", // green
     "candidate->candidate": "#98df8a", // light green
     "baseline->baseline": "#1f77b4", // blue
+    added: "#2ca02c", // green
+    removed: "#d62728", // red
+    stable: "#b5b5b5", // gray
   };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
