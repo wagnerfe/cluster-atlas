@@ -42,6 +42,7 @@
     precomputed = null,
     viewportHint = null,
     category = null,
+    survivor = null,
     text = null,
     image = null,
     importance = null,
@@ -212,7 +213,7 @@
     // Let Svelte track the dependencies. Include `bounds` and `precomputed`
     // so changing from null → set (or back) rebuilds the client with the
     // right SQL path.
-    let deps = { coordinator: coordinator, source: { table, x, y, category }, bounds, precomputed, viewportHint };
+    let deps = { coordinator: coordinator, source: { table, x, y, category, survivor }, bounds, precomputed, viewportHint };
 
     let client: { destroy: () => void } | null = null;
     let didDestroy = false;
@@ -382,6 +383,9 @@
               x: xExpr,
               y: yExpr,
               ...(source.category != null ? { c: SQL.sql`${SQL.column(source.category)}::UTINYINT` } : {}),
+              ...(source.category != null && source.survivor != null
+                ? { s: SQL.sql`COALESCE((${SQL.column(source.survivor)} = 1)::UTINYINT, 0)` }
+                : {}),
             })
             .where(predicate);
         },
@@ -433,11 +437,12 @@
           if (numRowsHint > 50_000_000 && typeof (globalThis as any).gc === "function") {
             (globalThis as any).gc();
           }
-          let xArray, yArray, categoryArray;
+          let xArray, yArray, categoryArray, survivorArray;
           try {
             xArray = data.getChild("x").toArray();
             yArray = data.getChild("y").toArray();
             categoryArray = data.getChild("c")?.toArray() ?? null;
+            survivorArray = data.getChild("s")?.toArray() ?? null;
           } catch (err) {
             console.error(`[atlas-stage] scatter-queryResult toArray() failed:`, err);
             throw err;
@@ -486,6 +491,14 @@
           }
           if (categoryArray != null && !(categoryArray instanceof Uint8Array)) {
             categoryArray = new Uint8Array(categoryArray);
+          }
+          if (categoryArray != null && survivorArray != null) {
+            // Pack the survivor flag into bit 7 of the category byte (bits 0-6 =
+            // category index). Both GPU renderers unpack it; avoids a 4th storage
+            // buffer against the already-tight WebGPU 8-buffer budget.
+            for (let i = 0; i < categoryArray.length; i++) {
+              if (survivorArray[i] != 0) categoryArray[i] |= 0x80;
+            }
           }
           const t2 = performance.now();
           xPackedData = nextXPacked;

@@ -145,6 +145,7 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
       pointSize: 1,
       pointAlpha: 1,
       pointsAlpha: 1,
+      survivorRingWidth: 0.1,
 
       densityScaler: 1,
       densityBandwidth: 1,
@@ -689,6 +690,7 @@ function makeRenderCommand(
           point_size: Math.max(props.mode == "points" ? 0.3 : 0.1, props.pointSize),
           point_alpha: props.pointAlpha,
           points_alpha: props.pointsAlpha,
+          survivor_ring_width: props.survivorRingWidth,
           density_scaler: props.densityScaler / (densityPixelRatio * densityPixelRatio),
           quantization_step: props.densityQuantizationStep,
           density_alpha: props.densityAlpha,
@@ -880,6 +882,7 @@ function makeDensityMapCommand(
         point_size: 0,
         point_alpha: 0,
         points_alpha: 0,
+        survivor_ring_width: 0,
         density_scaler: 0,
         quantization_step: 0,
         density_alpha: 0,

@@ -14,21 +14,29 @@ function shaderSource(hasCategory: boolean) {
       uniform float alpha;
       uniform vec4 colorScheme[64];
 
+      uniform float ring_width;
+
       layout(location=0) in float x;
       layout(location=1) in float y;
       layout(location=2) in int category;
 
       out vec4 color;
+      out float survivor;
 
       void main() {
         gl_Position = vec4(matrix * vec3(x, y, 1), 1);
-        if (category < 64) {
-          color = colorScheme[category];
+        // bit 7 of the category byte = survivor flag, bits 0-6 = category index.
+        // The attribute is a signed BYTE, so mask before use (bit 7 => negative).
+        int cat = category & 0x7F;
+        if (cat < 64) {
+          color = colorScheme[cat];
         } else {
           color = vec4(0.5, 0.5, 0.5, 1);
         }
         color *= alpha;
-        gl_PointSize = point_size;
+        survivor = float((category >> 7) & 1) * alpha;
+        // survivor quads expand by the ring width so the ring sits outside the disc
+        gl_PointSize = point_size * (1.0 + ring_width * float((category >> 7) & 1));
       }
     `;
   } else {
@@ -43,11 +51,13 @@ function shaderSource(hasCategory: boolean) {
       layout(location=1) in float y;
 
       out vec4 color;
+      out float survivor;
 
       void main() {
         gl_Position = vec4(matrix * vec3(x, y, 1), 1);
         color = colorScheme;
         color *= alpha;
+        survivor = 0.0;
         gl_PointSize = point_size;
       }
     `;
@@ -55,18 +65,34 @@ function shaderSource(hasCategory: boolean) {
   let fragment = `#version 300 es
     precision highp float;
     uniform float point_size;
+    uniform float ring_width;
     in vec4 color;
+    in float survivor;
     out vec4 outColor;
     void main() {
-      float r = length(gl_PointCoord.xy - vec2(0.5, 0.5)) * point_size;
-      float a = max(0.0, min(1.0, point_size / 2.0 - r));
-      outColor = color * a;
+      float expand = 1.0 + ring_width * (survivor > 0.0 ? 1.0 : 0.0);
+      float r = length(gl_PointCoord.xy - vec2(0.5, 0.5)) * point_size * expand;
+      float disc_a = max(0.0, min(1.0, point_size / 2.0 - r));
+      vec4 c = color * disc_a;
+      if (survivor > 0.0 && ring_width > 0.0) {
+        // light-red ring spanning [disc edge, disc edge * (1 + ring_width)]
+        float ring_outer = point_size / 2.0 * (1.0 + ring_width);
+        float ring_a = max(0.0, min(1.0, min(r - point_size / 2.0 + 1.0, ring_outer - r)));
+        c += vec4(1.0, 0.35, 0.35, 1.0) * survivor * ring_a * (1.0 - disc_a);
+      }
+      outColor = c;
     }
   `;
   return { vertex, fragment };
 }
 
-type PaintDiscretePointsCommand = (matrix: Matrix3, pointSize: number, alpha: number, colors: number[]) => void;
+type PaintDiscretePointsCommand = (
+  matrix: Matrix3,
+  pointSize: number,
+  alpha: number,
+  colors: number[],
+  ringWidth: number,
+) => void;
 
 export function paintDiscretePointsCommand(
   df: Dataflow,
@@ -81,7 +107,7 @@ export function paintDiscretePointsCommand(
   let program = df.statefulDerive([gl, source.vertex, source.fragment], webglProgram);
   return df.derive(
     [gl, program, x, y, category, count],
-    (gl, program, x, y, category, count) => (matrix, radius, alpha, colors) => {
+    (gl, program, x, y, category, count) => (matrix, radius, alpha, colors, ringWidth) => {
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -103,6 +129,9 @@ export function paintDiscretePointsCommand(
       gl.uniformMatrix3fv(program.uniforms.matrix, false, matrix);
       gl.uniform1f(program.uniforms.point_size, radius * 2);
       gl.uniform1f(program.uniforms.alpha, alpha);
+      if (program.uniforms.ring_width != null) {
+        gl.uniform1f(program.uniforms.ring_width, ringWidth);
+      }
       if (hasCategory) {
         gl.uniform4fv(program.uniforms.colorScheme, colors);
       } else {

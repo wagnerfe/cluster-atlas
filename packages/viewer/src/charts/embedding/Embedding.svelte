@@ -126,6 +126,12 @@
   let clusterFilterEnabled = $derived(
     spec.data.lines != null && context.columns.some((c) => c.name === CLUSTER_FILTER_COLUMN),
   );
+
+  // Survivor ring — only in matcher-eval views (lines present) that carry a
+  // ``survivor`` column: points with survivor=1 get a light-red outer ring.
+  let survivorColumn = $derived(
+    spec.data.lines != null && context.columns.some((c) => c.name === "survivor") ? "survivor" : null,
+  );
   // The cluster id(s) currently filtered to (null = show all). Held as state so
   // the actual context.filter mutation happens in the reactive effect below, at
   // a clean tick — NOT synchronously inside onSelection. Updating the Selection
@@ -327,6 +333,7 @@
     image={spec.data.image}
     importance={spec.data.importance}
     category={categoryLegend?.indexColumn}
+    survivor={survivorColumn}
     categoryColors={categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor]}
     lines={spec.data.lines}
     linesVisibleTypes={spec.data.lines != null ? effectiveVisibleLineTypes : null}
@@ -338,6 +345,7 @@
       mapStyle: spec.mapStyle,
       ...(spec.minimumDensity != null ? { minimumDensity: spec.minimumDensity } : {}),
       pointSize: spec.pointSize ?? 2,
+      survivorRingWidth: spec.survivorRingWidth ?? 0.1,
       downsampleMaxPoints: spec.downsampleMaxPoints ?? defaultDownsampleMaxPoints,
       downsampleMaxPointsInteractive: spec.downsampleMaxPointsInteractive ?? defaultDownsampleMaxPointsInteractive,
     }}
@@ -491,6 +499,18 @@
             />
             <Button label="Auto" onClick={() => onSpecChange({ pointSize: 2 })} />
           </div>
+          {#if survivorColumn != null}
+            <div class="text-slate-500 dark:text-slate-400 select-none">Survivor Ring</div>
+            <div class="flex gap-2 items-center">
+              <Slider
+                bind:value={() => spec.survivorRingWidth ?? 0.1, (v) => onSpecChange({ survivorRingWidth: v })}
+                min={0.1}
+                max={1}
+                step={0.05}
+              />
+              <Button label="Auto" onClick={() => onSpecChange({ survivorRingWidth: 0.1 })} />
+            </div>
+          {/if}
           {#if totalPointCount != null && totalPointCount > minDownsampleMaxPoints}
             {@const effectiveLimit = spec.downsampleMaxPoints ?? Math.min(defaultDownsampleMaxPoints, totalPointCount)}
             {@const isMaxed = effectiveLimit >= totalPointCount}

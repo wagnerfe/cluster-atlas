@@ -34,6 +34,9 @@ export interface EmbeddingRendererProps {
   pointSize: number;
   pointAlpha: number;
   pointsAlpha: number;
+  /** Survivor-ring width as a fraction of the point radius (0.1–1);
+   *  the ring extends outward beyond the point circle. */
+  survivorRingWidth: number;
 
   densityScaler: number;
   densityBandwidth: number;
