@@ -10,12 +10,13 @@ function shaderSource(hasCategory: boolean) {
     vertex = `#version 300 es
       precision highp float;
       uniform mat3 matrix;
+      uniform vec2 origin;
       layout(location=0) in float x;
       layout(location=1) in float y;
       layout(location=2) in int category;
       out vec4 color;
       void main() {
-        gl_Position = vec4(matrix * vec3(x, y, 1), 1);
+        gl_Position = vec4(matrix * vec3(x - origin.x, y - origin.y, 1), 1);
         if (category == 0) {
           color = vec4(1, 0, 0, 0);
         } else if (category == 1) {
@@ -32,11 +33,12 @@ function shaderSource(hasCategory: boolean) {
     vertex = `#version 300 es
       precision highp float;
       uniform mat3 matrix;
+      uniform vec2 origin;
       layout(location=0) in float x;
       layout(location=1) in float y;
       out vec4 color;
       void main() {
-        gl_Position = vec4(matrix * vec3(x, y, 1), 1);
+        gl_Position = vec4(matrix * vec3(x - origin.x, y - origin.y, 1), 1);
         color = vec4(1, 0, 0, 0);
         gl_PointSize = 1.0;
       }
@@ -53,7 +55,7 @@ function shaderSource(hasCategory: boolean) {
   return { vertex, fragment };
 }
 
-type FillCountBufferCommand = (matrix: Matrix3) => void;
+type FillCountBufferCommand = (matrix: Matrix3, origin: [number, number]) => void;
 
 export function fillCountBufferCommand(
   df: Dataflow,
@@ -66,7 +68,7 @@ export function fillCountBufferCommand(
   let hasCategory = category != null;
   let source = shaderSource(hasCategory);
   let program = df.statefulDerive([gl, source.vertex, source.fragment], webglProgram);
-  return df.derive([gl, program, x, y, category, count], (gl, program, x, y, category, count) => (matrix) => {
+  return df.derive([gl, program, x, y, category, count], (gl, program, x, y, category, count) => (matrix, origin) => {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
 
@@ -86,6 +88,9 @@ export function fillCountBufferCommand(
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
     gl.uniformMatrix3fv(program.uniforms.matrix, false, matrix);
+    if (program.uniforms.origin != null) {
+      gl.uniform2f(program.uniforms.origin, origin[0], origin[1]);
+    }
 
     gl.drawArrays(gl.POINTS, 0, count);
 

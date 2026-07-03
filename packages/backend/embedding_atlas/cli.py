@@ -380,6 +380,7 @@ def _run_fast_path(
     duckdb_uri: str,
     lines_glob: str | None = None,
     lines_min_zoom: float | None = None,
+    text_column: str | None = None,
 ):
     """Serve the pre-populated DuckDB connection via FastAPI+uvicorn.
 
@@ -411,6 +412,9 @@ def _run_fast_path(
         def lines_parquet_provider() -> bytes:  # noqa: F811
             return to_parquet_bytes(con.sql('SELECT * FROM "lines"').df())
 
+        # Run-comparison datasets carry a `line_status` column (stable/added/
+        # removed); color lines by it instead of the single-run pair type.
+        lines_cols = {r[0] for r in con.execute('DESCRIBE "lines"').fetchall()}
         lines_files = ["lines.parquet"]
         lines_data_props = {
             "table": "lines",
@@ -418,7 +422,7 @@ def _run_fast_path(
             "y1": "lat1",
             "x2": "lon2",
             "y2": "lat2",
-            "pairType": "match_pair_type",
+            "pairType": "line_status" if "line_status" in lines_cols else "match_pair_type",
             "score": "composite_score",
             "minZoom": lines_min_zoom,
         }
@@ -433,7 +437,11 @@ def _run_fast_path(
         x=fast_connection.x_column,
         y=fast_connection.y_column,
         neighbors=None,
-        text=None,
+        # ``text_column`` only marks which column the viewer shows as
+        # tooltip/label text (``data.text``). Unlike the embedding ``--text``
+        # flag it does NOT trigger projection — the fast-path view already
+        # exposes every column, so this is pure metadata.
+        text=text_column,
         point_size=None,
         stop_words=None,
         labels=None,
@@ -532,8 +540,25 @@ def _run_fast_path(
     if lines_data_props is not None:
         props.setdefault("data", {})["lines"] = lines_data_props
         # Color points by their matcher-eval class on load (the four Point
-        # classes). The user can still switch the Color column in the UI.
-        props["data"]["category"] = "point_class"
+        # classes). Run-comparison datasets carry `delta_class` — default to
+        # it so the diff is the first thing on screen. The user can still
+        # switch the Color column in the UI.
+        from .fast_load import quote_ident
+
+        points_cols = {
+            r[0]
+            for r in con.execute(
+                f"DESCRIBE {quote_ident(fast_connection.table)}"
+            ).fetchall()
+        }
+        props["data"]["category"] = next(
+            (
+                c
+                for c in ("delta_class_coarse", "delta_class", "point_class")
+                if c in points_cols
+            ),
+            "point_class",
+        )
     metadata = {"props": props}
     identifier = sha256_hexdigest(
         [__version__, [fast_connection.table], metadata], scope="DataSource"

@@ -24,6 +24,42 @@ const POINT_CLASS_COLORS: Record<string, string> = {
   unmatched_candidate: "#d62728", // red
 };
 
+/**
+ * Fixed colors for the run-comparison ``delta_class`` enum (see the
+ * databricks_prebuild_run_comparison notebook). Gray = unchanged, green =
+ * gained a match, red/orange = lost one, amber = partner changed, purple/blue
+ * = same-origin dedup, brown = record only in one run's corpus. Line colors
+ * for ``line_status`` (added/removed/stable) mirror the gain/loss hues.
+ */
+const DELTA_CLASS_COLORS: Record<string, string> = {
+  stable: "#c7c7c7", // light gray
+  candidate_matched: "#2ca02c", // green
+  baseline_matched: "#17becf", // teal
+  candidate_unmatched: "#d62728", // red
+  baseline_unmatched: "#ff7f0e", // orange
+  candidate_rematched: "#bcbd22", // olive
+  baseline_rematched: "#dbdb8d", // light olive
+  duplicate_candidate_matched: "#9467bd", // purple
+  duplicate_baseline_matched: "#1f77b4", // blue
+  corpus_drift: "#8c564b", // brown
+};
+
+/** Coarse rollup of ``delta_class`` (the default color column for comparison
+ *  datasets): stable | matched (gained/rematched/dedup) | unmatched (lost) |
+ *  corpus_drift. */
+const DELTA_CLASS_COARSE_COLORS: Record<string, string> = {
+  stable: "#c7c7c7", // light gray
+  matched: "#2ca02c", // green
+  unmatched: "#d62728", // red
+  corpus_drift: "#8c564b", // brown
+};
+
+const PINNED_COLUMN_COLORS: Record<string, Record<string, string>> = {
+  point_class: POINT_CLASS_COLORS,
+  delta_class: DELTA_CLASS_COLORS,
+  delta_class_coarse: DELTA_CLASS_COARSE_COLORS,
+};
+
 export interface EmbeddingLegend {
   indexColumn: string;
   legend: {
@@ -128,7 +164,7 @@ async function makeDiscreteCategoryColumn(
 
   let legend: EmbeddingLegend["legend"] = values.map(({ value }, i) => ({
     label: value,
-    color: (column === "point_class" ? POINT_CLASS_COLORS[value] : undefined) ?? colors[i],
+    color: PINNED_COLUMN_COLORS[column]?.[value] ?? colors[i],
     predicate: SQL.eq(SQL.cast(SQL.column(column), "TEXT"), SQL.literal(value)),
     count: countMap.get(i) ?? 0,
   }));

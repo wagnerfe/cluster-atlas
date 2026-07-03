@@ -11,6 +11,11 @@
       coordsBoundsX?: [number, number] | null;
       coordsBoundsY?: [number, number] | null;
       category: Uint8Array<ArrayBuffer> | null;
+      /** When set, ``x``/``y`` are stored relative to this data-space
+       *  origin (subtracted server-side in f64 before the f32 cast for
+       *  street-zoom precision). Forwarded to the renderer, which folds
+       *  it back into its transform in f64. */
+      positionOffset?: [number, number] | null;
     };
     /** Set when the parent already projected ``data.y`` to Mercator on
      *  the server (GIS Path C optimisation). The internal projection
@@ -26,6 +31,9 @@
     totalCount: number | null;
     maxDensity: number | null;
     labels?: Label[] | null;
+    /** Per-point name labels drawn directly above each dot (always visible,
+     *  no collision solving). Independent of ``labels`` (cluster labels). */
+    pointLabels?: Label[] | null;
     queryClusterLabels: ((clusters: Rectangle[][]) => Promise<(LabelContent | null)[]>) | null;
     tooltip: Selection | null;
     selection: Selection[] | null;
@@ -48,6 +56,9 @@
     /** Notifies the wrapper of the current lon/lat viewport bbox (or null when
      *  below the zoom gate) so it can (re)query the lines. */
     onLinesViewport?: ((bbox: { xMin: number; xMax: number; yMin: number; yMax: number } | null) => void) | null;
+    /** Push the current viewport bbox (data coords) so the wrapper can query
+     *  the names of points in view for the per-point label layer. */
+    onPointLabelsViewport?: ((bbox: { xMin: number; xMax: number; yMin: number; yMax: number } | null) => void) | null;
     /** Match-line pair types to show. `null`/absent = all; `[]` = none. */
     linesVisibleTypes?: string[] | null;
   }
@@ -172,6 +183,7 @@
     totalCount = null,
     maxDensity = null,
     labels = null,
+    pointLabels = null,
     queryClusterLabels = null,
     tooltip = null,
     selection = null,
@@ -187,6 +199,7 @@
     onRangeSelection = null,
     cache = null,
     lines = null,
+    onPointLabelsViewport = null,
     lineRows = null,
     onLinesViewport = null,
     linesVisibleTypes = null,
@@ -486,6 +499,12 @@
 
   let pointSize = $derived(viewingParams.pointSize);
 
+  // Per-point name labels are drawn directly (see the ``pointLabels`` SVG block
+  // below) — not through the cluster-label collision solver, whose scale window
+  // is derived from the full-dataset viewport and would cull a dense per-point
+  // set entirely. This offset lifts the text just above the dot.
+  let pointLabelYOffset = $derived(Math.max(3, pointSize / pixelRatio) + 9);
+
   let needsUpdateLabels = true;
 
   // The viewport at time of the last actual WebGPU render. When a gesture
@@ -611,9 +630,11 @@
       yPacked: data.yPacked ?? null,
       coordsBoundsX: data.coordsBoundsX ?? null,
       coordsBoundsY: data.coordsBoundsY ?? null,
+      positionOffset: data.positionOffset ?? null,
       category: data.category,
       categoryCount,
       categoryColors: resolvedCategoryColors,
+      survivorRingWidth: config?.survivorRingWidth ?? 0.1,
       downsampleMaxPoints: effectiveDownsampleMaxPoints,
       downsampleDensityWeight: effectiveDownsampleDensityWeight,
       // Reuse the last compacted set for the entire duration of an
@@ -1017,10 +1038,15 @@
   // `point_class` palette (see makeCategoryColumn): a candidate->baseline match
   // reads the same green as a matched_candidate point, baseline->baseline the
   // same blue as matched_baseline, and candidate->candidate a lighter green.
+  // Run-comparison datasets color by `line_status` instead: added (green) /
+  // removed (red) mirror the delta_class gain/loss hues; stable is gray.
   const LINE_COLORS: Record<string, string> = {
     "candidate->baseline": "#2ca02c", // green
     "candidate->candidate": "#98df8a", // light green
     "baseline->baseline": "#1f77b4", // blue
+    added: "#2ca02c", // green
+    removed: "#d62728", // red
+    stable: "#b5b5b5", // gray
   };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1080,6 +1106,46 @@
     if (typeof window !== "undefined") {
       (window as any).__geospatialAtlasRefreshLines = () => pushLinesViewport();
     }
+  });
+
+  // Push the current viewport bbox so the wrapper can query the names of the
+  // points in view (the per-point label layer). Uses the inverse projection so
+  // it works with or without a basemap. Debounced; re-projection of the
+  // returned labels happens reactively in the SVG below.
+  let pointLabelsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  function pushPointLabelsViewport() {
+    if (onPointLabelsViewport == null) {
+      return;
+    }
+    if (config?.showPointLabels !== true) {
+      onPointLabelsViewport(null);
+      return;
+    }
+    const c0 = coordinateAtPoint(0, 0);
+    const c1 = coordinateAtPoint(width, height);
+    onPointLabelsViewport({
+      xMin: Math.min(c0.x, c1.x),
+      xMax: Math.max(c0.x, c1.x),
+      yMin: Math.min(c0.y, c1.y),
+      yMax: Math.max(c0.y, c1.y),
+    });
+  }
+
+  $effect(() => {
+    void resolvedViewportState;
+    void (config?.showPointLabels);
+    void width;
+    void height;
+    if (onPointLabelsViewport == null) {
+      return;
+    }
+    if (pointLabelsRefreshTimer != null) {
+      clearTimeout(pointLabelsRefreshTimer);
+    }
+    pointLabelsRefreshTimer = setTimeout(() => {
+      pointLabelsRefreshTimer = null;
+      pushPointLabelsViewport();
+    }, 150);
   });
 
   $effect(() => {
@@ -1614,6 +1680,36 @@
               {/if}
             {/if}
           </g>
+        {/each}
+      </g>
+    {/if}
+    <!-- Per-point name labels: drawn directly above each dot, always visible
+         (no collision solving / zoom gating). Only on-screen labels are
+         emitted to keep the DOM bounded. -->
+    {#if pointLabels != null && pointLabels.length > 0}
+      <g>
+        {#each pointLabels as pl (pl)}
+          {@const loc = pointLocation(pl.x, pl.y)}
+          {#if typeof pl.content === "string" && loc.x >= 0 && loc.x <= width && loc.y >= 0 && loc.y <= height}
+            <text
+              x={loc.x}
+              y={loc.y - pointLabelYOffset}
+              style:paint-order="stroke"
+              style:stroke-width="3"
+              style:stroke-linejoin="round"
+              style:stroke-linecap="round"
+              style:text-anchor="middle"
+              style:fill={resolvedTheme.clusterLabelColor}
+              style:stroke={resolvedTheme.clusterLabelOutlineColor}
+              style:user-select="none"
+              style:-webkit-user-select="none"
+              style:font-family={resolvedTheme.fontFamily}
+              font-size="11"
+              dominant-baseline="middle"
+            >
+              {pl.content}
+            </text>
+          {/if}
         {/each}
       </g>
     {/if}

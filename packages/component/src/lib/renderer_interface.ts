@@ -23,6 +23,12 @@ export interface EmbeddingRendererProps {
   coordsBoundsX?: [number, number] | null;
   coordsBoundsY?: [number, number] | null;
   category: Uint8Array<ArrayBuffer> | null;
+  /** When set, ``x``/``y`` are stored RELATIVE to this data-space origin
+   *  (subtracted server-side in f64 before the f32 cast, so street-level
+   *  zoom keeps sub-pixel precision). The renderer folds the offset back
+   *  into its transform in f64; every other renderer API (viewport props,
+   *  ``densityMap``) still speaks true data space. */
+  positionOffset?: [number, number] | null;
 
   categoryCount: number;
   categoryColors: string[] | null;
@@ -34,6 +40,9 @@ export interface EmbeddingRendererProps {
   pointSize: number;
   pointAlpha: number;
   pointsAlpha: number;
+  /** Survivor-ring width as a fraction of the point radius (0.1–1);
+   *  the ring extends outward beyond the point circle. */
+  survivorRingWidth: number;
 
   densityScaler: number;
   densityBandwidth: number;

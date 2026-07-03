@@ -65,6 +65,13 @@
     { key: "candidate->candidate", label: "Candidate → Candidate", color: "#98df8a" },
     { key: "baseline->baseline", label: "Baseline → Baseline", color: "#1f77b4" },
   ];
+  // Run-comparison datasets color lines by `line_status` instead (the backend
+  // sets pairType to that column when the lines parquet carries it).
+  const DIFF_LINE_TYPES = [
+    { key: "added", label: "Added (new run only)", color: "#2ca02c" },
+    { key: "removed", label: "Removed (old run only)", color: "#d62728" },
+    { key: "stable", label: "Stable (both runs)", color: "#b5b5b5" },
+  ];
 
   // Cluster filtering (matcher-eval): clicking a point publishes a
   // ``cluster_id IN (…)`` clause to the global cross-filter so only that
@@ -114,8 +121,16 @@
   });
 
   // Match-Lines visibility (matcher-eval). Master toggle + per-pair-type.
+  let matchLineTypes = $derived(
+    spec.data.lines?.pairType === "line_status" ? DIFF_LINE_TYPES : MATCH_LINE_TYPES,
+  );
   let matchLinesEnabled = $state(true);
-  let visibleMatchLineTypes = $state<string[]>(MATCH_LINE_TYPES.map((t) => t.key));
+  // svelte-ignore state_referenced_locally
+  let visibleMatchLineTypes = $state<string[]>(
+    (spec.data.lines?.pairType === "line_status" ? DIFF_LINE_TYPES : MATCH_LINE_TYPES).map(
+      (t) => t.key,
+    ),
+  );
   let effectiveVisibleLineTypes = $derived(matchLinesEnabled ? visibleMatchLineTypes : []);
 
   // Cluster filtering — only in matcher-eval views (lines present) that carry a
@@ -125,6 +140,12 @@
   const clusterFilterClient = new MosaicClient();
   let clusterFilterEnabled = $derived(
     spec.data.lines != null && context.columns.some((c) => c.name === CLUSTER_FILTER_COLUMN),
+  );
+
+  // Survivor ring — only in matcher-eval views (lines present) that carry a
+  // ``survivor`` column: points with survivor=1 get a light-red outer ring.
+  let survivorColumn = $derived(
+    spec.data.lines != null && context.columns.some((c) => c.name === "survivor") ? "survivor" : null,
   );
   // The cluster id(s) currently filtered to (null = show all). Held as state so
   // the actual context.filter mutation happens in the reactive effect below, at
@@ -327,6 +348,7 @@
     image={spec.data.image}
     importance={spec.data.importance}
     category={categoryLegend?.indexColumn}
+    survivor={survivorColumn}
     categoryColors={categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor]}
     lines={spec.data.lines}
     linesVisibleTypes={spec.data.lines != null ? effectiveVisibleLineTypes : null}
@@ -338,6 +360,8 @@
       mapStyle: spec.mapStyle,
       ...(spec.minimumDensity != null ? { minimumDensity: spec.minimumDensity } : {}),
       pointSize: spec.pointSize ?? 2,
+      survivorRingWidth: spec.survivorRingWidth ?? 0.1,
+      showPointLabels: spec.showPointLabels ?? false,
       downsampleMaxPoints: spec.downsampleMaxPoints ?? defaultDownsampleMaxPoints,
       downsampleMaxPointsInteractive: spec.downsampleMaxPointsInteractive ?? defaultDownsampleMaxPointsInteractive,
     }}
@@ -361,8 +385,13 @@
     onViewportState={(v) => onStateChange({ viewport: v })}
     rangeSelectionValue={chartState.brush}
     onRangeSelection={(v) => onStateChange({ brush: v ?? undefined })}
-    tooltip={tooltip}
+    tooltip={spec.showPointLabels ? null : tooltip}
     onTooltip={(v) => {
+      // When Point Labels is on, the name is shown as a standalone label above
+      // each dot — suppress the hover popup so nothing else appears on hover.
+      if (spec.showPointLabels) {
+        return;
+      }
       tooltip = v;
     }}
     selection={selection}
@@ -440,7 +469,7 @@
               <div class="text-slate-500 dark:text-slate-400 select-none">Match Lines</div>
               <Switch label="Show" value={matchLinesEnabled} onChange={(v) => (matchLinesEnabled = v)} />
             </div>
-            {#each MATCH_LINE_TYPES as t}
+            {#each matchLineTypes as t}
               <div class="flex items-center justify-between" class:opacity-50={!matchLinesEnabled}>
                 <div class="flex items-center gap-2">
                   <span style="display:inline-block;width:14px;height:3px;border-radius:2px;background:{t.color}"
@@ -491,6 +520,28 @@
             />
             <Button label="Auto" onClick={() => onSpecChange({ pointSize: 2 })} />
           </div>
+          {#if survivorColumn != null}
+            <div class="text-slate-500 dark:text-slate-400 select-none">Survivor Ring</div>
+            <div class="flex gap-2 items-center">
+              <Slider
+                bind:value={() => spec.survivorRingWidth ?? 0.1, (v) => onSpecChange({ survivorRingWidth: v })}
+                min={0.1}
+                max={1}
+                step={0.05}
+              />
+              <Button label="Auto" onClick={() => onSpecChange({ survivorRingWidth: 0.1 })} />
+            </div>
+          {/if}
+          {#if spec.data.text != null}
+            <div class="flex items-center justify-between">
+              <div class="text-slate-500 dark:text-slate-400 select-none">Point Labels</div>
+              <Switch
+                label="Show"
+                value={spec.showPointLabels ?? false}
+                onChange={(v) => onSpecChange({ showPointLabels: v })}
+              />
+            </div>
+          {/if}
           {#if totalPointCount != null && totalPointCount > minDownsampleMaxPoints}
             {@const effectiveLimit = spec.downsampleMaxPoints ?? Math.min(defaultDownsampleMaxPoints, totalPointCount)}
             {@const isMaxed = effectiveLimit >= totalPointCount}

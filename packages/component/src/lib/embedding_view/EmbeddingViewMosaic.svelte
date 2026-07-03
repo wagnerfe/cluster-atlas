@@ -25,7 +25,7 @@
     predicateForRangeSelection,
     queryApproximateDensity,
   } from "./mosaic_client.js";
-  import type { DataPoint, DataPointID, LabelContent } from "./types.js";
+  import type { DataPoint, DataPointID, Label, LabelContent } from "./types.js";
   import {
     textSummarizerAdd,
     textSummarizerCreate,
@@ -42,6 +42,7 @@
     precomputed = null,
     viewportHint = null,
     category = null,
+    survivor = null,
     text = null,
     image = null,
     importance = null,
@@ -197,6 +198,12 @@
   // (GIS Path C only). Prevents the ``EmbeddingViewImpl`` JS projection
   // loop from re-projecting and producing nonsense coords.
   let yIsAlreadyMercator: boolean = $state.raw(false);
+  // Data-space origin the f32 wire coordinates are relative to (GIS Path C
+  // only): the server subtracts it in f64 BEFORE the ::FLOAT cast, so the
+  // wire keeps sub-pixel precision at street zoom instead of the ~0.5–1.5 m
+  // quantisation of absolute f32 lon / Mercator-y. The renderer folds the
+  // offset back into its transform in f64 (``positionOffset`` prop).
+  let positionOffset: [number, number] | null = $state.raw(null);
   let categoryCount: number = $state.raw(1);
   let totalCount: number = $state.raw(1);
   let maxDensity: number = $state.raw(1);
@@ -212,7 +219,13 @@
     // Let Svelte track the dependencies. Include `bounds` and `precomputed`
     // so changing from null → set (or back) rebuilds the client with the
     // right SQL path.
-    let deps = { coordinator: coordinator, source: { table, x, y, category }, bounds, precomputed, viewportHint };
+    let deps = {
+      coordinator: coordinator,
+      source: { table, x, y, category, survivor },
+      bounds,
+      precomputed,
+      viewportHint,
+    };
 
     let client: { destroy: () => void } | null = null;
     let didDestroy = false;
@@ -335,6 +348,17 @@
       const precomputedYIsMerc =
         packed && precomputedCols != null && (precomputedCols as { y_is_mercator?: boolean }).y_is_mercator === true;
       yIsAlreadyMercator = gisProjectInQuery || precomputedYIsMerc;
+      // Wire-precision origin (Path C only): subtracted in f64 server-side
+      // before the ::FLOAT cast; folded back by the renderer. y is in
+      // Mercator space on this path, so project the hint's center too.
+      let queryOffset: [number, number] | null = null;
+      if (gisProjectInQuery && viewportHint != null) {
+        const cx = viewportHint.centerX;
+        const mercCy = (Math.log(Math.tan(Math.PI / 4 + (viewportHint.centerY * Math.PI) / 360)) * 180) / Math.PI;
+        if (isFinite(cx) && isFinite(mercCy)) {
+          queryOffset = [cx, mercCy];
+        }
+      }
       client = makeClient({
         coordinator: deps.coordinator,
         selection: filter ?? undefined,
@@ -366,22 +390,33 @@
             xExpr = SQL.sql`((COALESCE(${SQL.column(source.x)}, ${xMin}) - ${xMin}) * ${xScale})::UINTEGER`;
             yExpr = SQL.sql`((COALESCE(${SQL.column(source.y)}, ${yMin}) - ${yMin}) * ${yScale})::UINTEGER`;
           } else {
-            xExpr = SQL.sql`${SQL.column(source.x)}::FLOAT`;
             // Server-side Mercator projection (GIS Path C only). Saves
             // ~1.8 s on 75 M-row cold loads — DuckDB's vectorised
             // tan/log is C-level fast, while the equivalent JS loop
             // single-threads through ``Math.tan`` 75 M times.
             // ``yIsAlreadyMercator`` tells ``EmbeddingViewImpl`` to
             // skip its own projection so we don't double-project.
-            yExpr = gisProjectInQuery
-              ? SQL.sql`(LN(TAN(PI()/4 + ${SQL.column(source.y)} * PI() / 360))*180/PI())::FLOAT`
-              : SQL.sql`${SQL.column(source.y)}::FLOAT`;
+            // ``queryOffset`` (when set) is subtracted in f64 BEFORE the
+            // f32 cast so street-zoom precision survives the wire — the
+            // renderer's ``positionOffset`` folds it back.
+            if (queryOffset != null) {
+              xExpr = SQL.sql`(${SQL.column(source.x)} - ${queryOffset[0]})::FLOAT`;
+              yExpr = SQL.sql`(LN(TAN(PI()/4 + ${SQL.column(source.y)} * PI() / 360))*180/PI() - ${queryOffset[1]})::FLOAT`;
+            } else {
+              xExpr = SQL.sql`${SQL.column(source.x)}::FLOAT`;
+              yExpr = gisProjectInQuery
+                ? SQL.sql`(LN(TAN(PI()/4 + ${SQL.column(source.y)} * PI() / 360))*180/PI())::FLOAT`
+                : SQL.sql`${SQL.column(source.y)}::FLOAT`;
+            }
           }
           return SQL.Query.from(source.table)
             .select({
               x: xExpr,
               y: yExpr,
               ...(source.category != null ? { c: SQL.sql`${SQL.column(source.category)}::UTINYINT` } : {}),
+              ...(source.category != null && source.survivor != null
+                ? { s: SQL.sql`COALESCE((${SQL.column(source.survivor)} = 1)::UTINYINT, 0)` }
+                : {}),
             })
             .where(predicate);
         },
@@ -433,11 +468,12 @@
           if (numRowsHint > 50_000_000 && typeof (globalThis as any).gc === "function") {
             (globalThis as any).gc();
           }
-          let xArray, yArray, categoryArray;
+          let xArray, yArray, categoryArray, survivorArray;
           try {
             xArray = data.getChild("x").toArray();
             yArray = data.getChild("y").toArray();
             categoryArray = data.getChild("c")?.toArray() ?? null;
+            survivorArray = data.getChild("s")?.toArray() ?? null;
           } catch (err) {
             console.error(`[atlas-stage] scatter-queryResult toArray() failed:`, err);
             throw err;
@@ -487,6 +523,14 @@
           if (categoryArray != null && !(categoryArray instanceof Uint8Array)) {
             categoryArray = new Uint8Array(categoryArray);
           }
+          if (categoryArray != null && survivorArray != null) {
+            // Pack the survivor flag into bit 7 of the category byte (bits 0-6 =
+            // category index). Both GPU renderers unpack it; avoids a 4th storage
+            // buffer against the already-tight WebGPU 8-buffer budget.
+            for (let i = 0; i < categoryArray.length; i++) {
+              if (survivorArray[i] != 0) categoryArray[i] |= 0x80;
+            }
+          }
           const t2 = performance.now();
           xPackedData = nextXPacked;
           yPackedData = nextYPacked;
@@ -494,6 +538,8 @@
           coordsBoundsY = nextBoundsY;
           xData = nextX;
           yData = nextY;
+          // Keep the offset in lock-step with the arrays it applies to.
+          positionOffset = nextXPacked != null ? null : queryOffset;
           categoryData = categoryArray;
           updateTooltip(null);
           updateSelection(null);
@@ -845,6 +891,104 @@
     return output;
   }
 
+  // Per-point name labels. When ``config.showPointLabels`` is on and a ``text``
+  // column is available, fetch the names of the points currently within the
+  // viewport (capped) and render them directly above each dot in
+  // EmbeddingViewImpl — always visible, no collision solving.
+  //
+  // This is a real Mosaic client (``selection: filter``) so it re-queries
+  // automatically when the cross-filter changes — legend category selection,
+  // cluster filter, range selection — meaning the labels always match exactly
+  // the points the scatter is displaying. The viewport bbox is pushed from
+  // EmbeddingViewImpl (``onPointLabelsViewport``) and triggers a re-query on
+  // pan/zoom via ``requestQuery()``.
+  const DEFAULT_POINT_LABELS_MAX = 750;
+  let pointNameLabels = $state.raw<Label[] | null>(null);
+  let pointLabelsBbox: { xMin: number; xMax: number; yMin: number; yMax: number } | null = null;
+  let pointLabelsClient: MosaicClient | null = null;
+
+  function buildPointLabelsQuery(predicate: any): any {
+    if (text == null || pointLabelsBbox == null) {
+      return null;
+    }
+    let cap = config?.pointLabelsMaxCount ?? DEFAULT_POINT_LABELS_MAX;
+    let conditions: any[] = [
+      SQL.sql`${SQL.column(text)} IS NOT NULL AND LENGTH(TRIM(${SQL.column(text)}::VARCHAR)) > 0`,
+      SQL.isBetween(SQL.column(x), [pointLabelsBbox.xMin, pointLabelsBbox.xMax]),
+      SQL.isBetween(SQL.column(y), [pointLabelsBbox.yMin, pointLabelsBbox.yMax]),
+    ];
+    // Same cross-filter predicate the scatter obeys — labels track the visible
+    // points (e.g. a ``matched_candidate`` legend selection shows only those).
+    if (predicate != null && String(predicate).trim().length > 0) {
+      conditions.push(predicate);
+    }
+    return SQL.Query.from(table)
+      .select({ x: SQL.column(x), y: SQL.column(y), text: SQL.column(text) })
+      .where(SQL.and(...conditions))
+      .limit(cap);
+  }
+
+  function extractPointNameLabels(data: any): Label[] {
+    let xs = data.getChild("x").toArray();
+    let ys = data.getChild("y").toArray();
+    let ts = data.getChild("text").toArray();
+    let out: Label[] = [];
+    for (let i = 0; i < xs.length; i++) {
+      let content = ts[i];
+      if (content == null) {
+        continue;
+      }
+      let str = String(content);
+      if (str.length == 0) {
+        continue;
+      }
+      out.push({ x: xs[i], y: ys[i], content: str, level: 0 });
+    }
+    return out;
+  }
+
+  // Connect/disconnect the point-labels client to the active selection.
+  $effect(() => {
+    if (config?.showPointLabels !== true || text == null) {
+      pointNameLabels = null;
+      return;
+    }
+    let client = makeClient({
+      coordinator,
+      selection: filter ?? undefined,
+      query: (predicate) => buildPointLabelsQuery(predicate),
+      queryResult: (data: any) => {
+        pointNameLabels = extractPointNameLabels(data);
+      },
+    });
+    pointLabelsClient = client;
+    return () => {
+      coordinator.disconnect(client);
+      if (pointLabelsClient === client) {
+        pointLabelsClient = null;
+      }
+      pointNameLabels = null;
+    };
+  });
+
+  // Called by the embedding view when the viewport changes. Stores the bbox and
+  // re-runs the client query (null = point labels off / no viewport yet).
+  function setPointLabelsViewport(bbox: { xMin: number; xMax: number; yMin: number; yMax: number } | null) {
+    pointLabelsBbox = bbox;
+    if (bbox == null) {
+      if (pointNameLabels != null) {
+        pointNameLabels = null;
+      }
+      return;
+    }
+    pointLabelsClient?.requestQuery();
+  }
+
+  // The point-name labels shown above each dot when the toggle is on. Kept
+  // separate from ``labels`` (cluster labels) — they render through a dedicated
+  // always-visible path in EmbeddingViewImpl, not the collision solver.
+  let effectivePointLabels = $derived(config?.showPointLabels === true ? pointNameLabels : null);
+
   function measureImageSize(src: string): Promise<{ width: number; height: number }> {
     return new Promise((resolve) => {
       let img = new Image();
@@ -869,6 +1013,7 @@
     coordsBoundsX: coordsBoundsX,
     coordsBoundsY: coordsBoundsY,
     category: categoryData,
+    positionOffset: positionOffset,
   }}
   yIsAlreadyMercator={yIsAlreadyMercator}
   totalCount={totalCount}
@@ -879,6 +1024,8 @@
   querySelection={querySelection}
   queryClusterLabels={queryClusterLabels}
   labels={labels}
+  pointLabels={effectivePointLabels}
+  onPointLabelsViewport={setPointLabelsViewport}
   customTooltip={customTooltip}
   customOverlay={customOverlay}
   tooltip={effectiveTooltip}
