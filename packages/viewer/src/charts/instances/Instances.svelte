@@ -50,10 +50,12 @@
   let defaultColumnWidths = $state.raw<Record<string, number>>({});
 
   // ---- Cluster basket (matcher-eval) -------------------------------------
-  // Accumulate the id<->base_id pairs of the clusters the user picks (via the
-  // map's click-to-filter) into a server-side table, then download it as
-  // parquet. Only shown when a ``cluster_id`` column is present (the prebuilt
-  // matcher-eval format), which also guarantees the ``lines`` table exists.
+  // Accumulate the match lines of the clusters the user picks (via the map's
+  // click-to-filter) into a server-side table, then download it as parquet. Each
+  // row carries the ``lines`` columns (minus the rendering-only endpoint coords /
+  // match_pair_type) plus ``cluster_id`` and the empty ``label`` / ``label_quality``
+  // annotation columns. Only shown when a ``cluster_id`` column is present (the
+  // prebuilt matcher-eval format), which also guarantees the ``lines`` table exists.
   const BASKET_TABLE = "__cluster_basket";
   let basketEnabled = $derived(context.columns.some((c) => c.name === "cluster_id"));
   let basketCount = $state.raw(0);
@@ -102,9 +104,31 @@
     }
   });
 
-  // Add the currently-selected cluster's id<->base_id pairs to the basket. The
-  // pairs come from the ``lines`` table, scoped to the cluster by joining to the
-  // points that pass the active filter; deduped on (id, base_id).
+  // Add the currently-selected cluster's match lines to the basket. Each row is
+  // one ``lines`` row scoped to the cluster by joining to the points that pass
+  // the active filter, enriched with the point's ``cluster_id``; deduped on
+  // (id, base_id). The rendering-only geometry columns (lon/lat endpoints,
+  // match_pair_type) are dropped, and two annotation columns are added for the
+  // downstream labelling pass: ``label`` (empty, to be filled with 1/0) and
+  // ``label_quality`` (defaults to 1).
+  const BASKET_DROP_COLUMNS = ["lon1", "lon2", "lat1", "lat2", "match_pair_type"];
+  // Columns pulled to the front of the exported parquet, in this order (they are
+  // still kept — just reordered); the remaining ``lines`` columns follow in their
+  // natural order. Names must exist in the enriched lines schema.
+  const BASKET_FRONT_COLUMNS = [
+    "names",
+    "base_names",
+    "addresses",
+    "base_addresses",
+    "taxonomy",
+    "base_taxonomy",
+    "websites",
+    "base_websites",
+    "socials",
+    "base_socials",
+    "emails",
+    "base_emails",
+  ];
   async function addClusterToBasket() {
     let pred = activePredicate();
     if (!basketEnabled || basketBusy || pred == null) {
@@ -113,18 +137,37 @@
     basketBusy = true;
     try {
       let pointsSub = String(SQL.Query.from(context.table).select("id", "cluster_id").where(pred));
-      let shape = `SELECT l."id" AS id, l."base_id" AS base_id, p."cluster_id" AS cluster_id
+      // Front columns are listed explicitly first, then EXCLUDE'd from ``l.*`` so
+      // they are not duplicated; the drop columns are EXCLUDE'd outright.
+      let front = BASKET_FRONT_COLUMNS.map((c) => `l."${c}"`).join(", ");
+      let exclude = `EXCLUDE (${[...BASKET_FRONT_COLUMNS, ...BASKET_DROP_COLUMNS].join(", ")})`;
+      let extra = `p."cluster_id" AS cluster_id,
+        CAST(NULL AS INTEGER) AS label,
+        CAST(1 AS INTEGER) AS label_quality`;
+      let shape = `SELECT ${front}, l.* ${exclude}, ${extra}
         FROM "lines" l JOIN "${context.table}" p ON l."id" = p."id" WHERE FALSE`;
-      await context.coordinator.exec(`
-        CREATE TABLE IF NOT EXISTS ${BASKET_TABLE} AS ${shape};
-        INSERT INTO ${BASKET_TABLE}
-        SELECT DISTINCT l."id", l."base_id", p."cluster_id"
+      let insert = `INSERT INTO ${BASKET_TABLE}
+        SELECT DISTINCT ${front}, l.* ${exclude}, ${extra}
         FROM "lines" l
         JOIN (${pointsSub}) p ON l."id" = p."id"
         WHERE NOT EXISTS (
           SELECT 1 FROM ${BASKET_TABLE} b WHERE b."id" = l."id" AND b."base_id" = l."base_id"
-        );
-      `);
+        );`;
+      try {
+        await context.coordinator.exec(`
+          CREATE TABLE IF NOT EXISTS ${BASKET_TABLE} AS ${shape};
+          ${insert}
+        `);
+      } catch {
+        // A basket table left by an earlier build may have a different schema, so
+        // CREATE ... IF NOT EXISTS is a no-op and the INSERT fails on the column
+        // mismatch. Rebuild it fresh (drops any accumulated rows) and retry once.
+        await context.coordinator.exec(`
+          DROP TABLE IF EXISTS ${BASKET_TABLE};
+          CREATE TABLE ${BASKET_TABLE} AS ${shape};
+          ${insert}
+        `);
+      }
       await refreshBasketCount();
     } finally {
       basketBusy = false;
