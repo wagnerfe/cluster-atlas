@@ -280,10 +280,18 @@
   );
 
   async function animateToPoint(identifier: RowID): Promise<void> {
-    let defaultScale = await context.cache.value(`embedding/default-viewport-scale/${spec.data.x},${spec.data.y}`, () =>
-      defaultViewportScale(context.coordinator, context.table, spec.data.x, spec.data.y),
-    );
-    let scale = defaultScale * 2;
+    // Pan to the point but keep the user's current zoom level. chartState is
+    // the live viewport (updated on every manual pan/zoom); animatingViewport
+    // can hold a stale value from a finished animation, so it is only a
+    // fallback. Only use the default scale when there is no viewport at all.
+    let scale = (chartState.viewport ?? animatingViewport)?.scale;
+    if (scale == null) {
+      let defaultScale = await context.cache.value(
+        `embedding/default-viewport-scale/${spec.data.x},${spec.data.y}`,
+        () => defaultViewportScale(context.coordinator, context.table, spec.data.x, spec.data.y),
+      );
+      scale = defaultScale * 2;
+    }
     // Query the x, y location.
     let result = await context.coordinator.query(
       SQL.Query.from(context.table)
@@ -294,6 +302,10 @@
         .where(SQL.eq(SQL.column(context.id), SQL.literal(identifier))),
     );
     let { x, y } = result.get(0) as { x: number; y: number };
+    if (spec.data.isGis) {
+      // The viewport lives in Web Mercator y, but the data column is latitude.
+      y = (Math.log(Math.tan(Math.PI / 4 + (y * Math.PI) / 360)) * 180) / Math.PI;
+    }
     // Start animation and show tooltip.
     startViewportAnimation({ x: x, y: y, scale: scale });
     tooltip = identifier;
@@ -321,6 +333,10 @@
         currentViewportAnimation = requestAnimationFrame(callback);
       } else {
         onStateChange({ viewport: animatingViewport });
+        // Clear so it never leaks a stale viewport into the next animation's
+        // start state (which showed up as a zoom in/out wobble on fly-to).
+        animatingViewport = null;
+        currentViewportAnimation = null;
       }
     };
     if (currentViewportAnimation) {
