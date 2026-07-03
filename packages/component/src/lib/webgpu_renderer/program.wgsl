@@ -38,6 +38,11 @@ struct Uniforms {
   survivor_ring_width: f32,
   matrix: mat3x3<f32>,
   view_xy_scaler: vec2<f32>,
+  // Camera-relative rendering origin (see matrix3_rebase_f32_origin): the
+  // f32-snapped data-space point at the clip center. get_point subtracts it
+  // from every position; the CPU folds the same value into `matrix` in f64.
+  // Fits the pre-existing padding hole before kde_causal — layout unchanged.
+  origin: vec2<f32>,
   kde_causal: vec4<f32>,
   kde_anticausal: vec4<f32>,
   kde_a: vec4<f32>,
@@ -107,7 +112,10 @@ struct FragmentOutput {
 
 fn get_point(index: u32) -> PointData {
   var result: PointData;
-  result.position = vec3(x_buffer[index], y_buffer[index], 1.0);
+  // Camera-relative: subtracting the f32 origin from f32 positions is exact
+  // for viewport-nearby points (Sterbenz), removing the deep-zoom f32
+  // rounding drift of matrix * absolute-position.
+  result.position = vec3(x_buffer[index] - uniforms.origin.x, y_buffer[index] - uniforms.origin.y, 1.0);
   if (uniforms.category_count > 1) {
     // Byte layout: bit 7 = survivor flag, bits 0-6 = category index
     // (packed host-side in EmbeddingViewMosaic to avoid a 4th storage buffer).

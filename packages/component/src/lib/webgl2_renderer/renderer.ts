@@ -3,9 +3,11 @@
 import { defaultCategoryColors, parseColorNormalizedRgb } from "../colors.js";
 import { Dataflow, Node, ValueNode } from "../dataflow.js";
 import {
+  matrix3_fold_translation,
   matrix3_identity,
   matrix3_inverse,
   matrix3_matrix_mul_matrix,
+  matrix3_rebase_f32_origin,
   matrix3_vector_mul_matrix,
   type Matrix3,
 } from "../matrix.js";
@@ -65,6 +67,7 @@ export class EmbeddingRendererWebGL2 implements EmbeddingRenderer {
       downsampleMaxPoints: 4000000,
       downsampleDensityWeight: 5,
       isGis: false,
+      positionOffset: null,
     };
 
     this.viewport = new Viewport({ x: 0, y: 0, scale: 1 }, width, height);
@@ -118,7 +121,11 @@ export class EmbeddingRendererWebGL2 implements EmbeddingRenderer {
     } else {
       this.renderInputs.categoryCount.value = 1;
     }
-    this.renderInputs.matrix.value = this.viewport.matrix();
+    // Fold the stored-coordinate offset (if any) in f64 — see the WebGPU
+    // renderer's setProps for details.
+    const off = this.props.positionOffset;
+    this.renderInputs.matrix.value =
+      off != null ? matrix3_fold_translation(this.viewport.matrix(), off[0], off[1]) : this.viewport.matrix();
     this.renderInputs.width.value = this.props.width;
     this.renderInputs.height.value = this.props.height;
     this.renderInputs.pointSize.value = this.props.pointSize;
@@ -140,7 +147,9 @@ export class EmbeddingRendererWebGL2 implements EmbeddingRenderer {
     let df = this.df.subgraph();
     let cmd = densityMapCommand(df, this.gl, this.dataBuffers, df.value(width), df.value(height), df.value(radius));
     let { x, y, scale: s } = viewportState;
-    let positionMatrix: Matrix3 = [s, 0, 0, 0, s, 0, -x * s, -y * s, 1];
+    // Same stored-offset handling as the WebGPU renderer's densityMap.
+    const [offX, offY] = this.props.positionOffset ?? [0, 0];
+    let positionMatrix: Matrix3 = matrix3_fold_translation([s, 0, 0, 0, s, 0, -x * s, -y * s, 1], offX, offY);
     let data = cmd.value(positionMatrix);
     let inv_matrix = matrix3_inverse(positionMatrix);
     let isGis = this.props.isGis;
@@ -153,7 +162,8 @@ export class EmbeddingRendererWebGL2 implements EmbeddingRenderer {
         let tx = (x / width) * 2 - 1;
         let ty = (y / height) * 2 - 1;
         let r = matrix3_vector_mul_matrix([tx, ty, 1], inv_matrix);
-        return { x: r[0], y: isGis ? Viewport.unprojectLat(r[1]) : r[1] };
+        let yTrue = r[1] + offY;
+        return { x: r[0] + offX, y: isGis ? Viewport.unprojectLat(yTrue) : yTrue };
       },
     };
   }
@@ -250,8 +260,12 @@ function pointsRenderCommand(
         gl.viewport(0, 0, linearFB.width, linearFB.height);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
+        // Camera-relative rebase against deep-zoom f32 drift (see
+        // matrix3_rebase_f32_origin); the vertex shader subtracts `origin`.
+        let rebased = matrix3_rebase_f32_origin(matrix);
         paintDiscretePoints(
-          matrix,
+          rebased.matrix,
+          rebased.origin,
           Math.max(0.3, props.pointSize),
           props.pointAlpha * props.pointsAlpha,
           colorMatrix,
@@ -343,14 +357,14 @@ function densityRenderCommand(
         let scalerY = props.height / linearFB.height;
 
         let safeMarginAdjustmentMatrix: Matrix3 = [scalerX, 0, 0, 0, scalerY, 0, 0, 0, 1];
-        let matrix = matrix3_matrix_mul_matrix(safeMarginAdjustmentMatrix, positionMatrix);
+        let rebased = matrix3_rebase_f32_origin(matrix3_matrix_mul_matrix(safeMarginAdjustmentMatrix, positionMatrix));
 
         // Fill the count buffer
         gl.bindFramebuffer(gl.FRAMEBUFFER, countFB.framebuffer);
         gl.viewport(0, 0, countFB.width, countFB.height);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
-        fillCountBuffer(matrix);
+        fillCountBuffer(rebased.matrix, rebased.origin);
 
         // Clear
         gl.bindFramebuffer(gl.FRAMEBUFFER, linearFB.framebuffer);
@@ -427,13 +441,13 @@ function densityMapCommand(
       let scalerY = height / countFB.height;
 
       let safeMarginAdjustmentMatrix: Matrix3 = [scalerX, 0, 0, 0, scalerY, 0, 0, 0, 1];
-      let matrix = matrix3_matrix_mul_matrix(safeMarginAdjustmentMatrix, positionMatrix);
+      let rebased = matrix3_rebase_f32_origin(matrix3_matrix_mul_matrix(safeMarginAdjustmentMatrix, positionMatrix));
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, countFB.framebuffer);
       gl.viewport(0, 0, countFB.width, countFB.height);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      fillCountBuffer(matrix);
+      fillCountBuffer(rebased.matrix, rebased.origin);
 
       gaussianBlur(countFB.texture, tempFB1, tempFB2);
 

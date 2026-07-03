@@ -198,6 +198,12 @@
   // (GIS Path C only). Prevents the ``EmbeddingViewImpl`` JS projection
   // loop from re-projecting and producing nonsense coords.
   let yIsAlreadyMercator: boolean = $state.raw(false);
+  // Data-space origin the f32 wire coordinates are relative to (GIS Path C
+  // only): the server subtracts it in f64 BEFORE the ::FLOAT cast, so the
+  // wire keeps sub-pixel precision at street zoom instead of the ~0.5–1.5 m
+  // quantisation of absolute f32 lon / Mercator-y. The renderer folds the
+  // offset back into its transform in f64 (``positionOffset`` prop).
+  let positionOffset: [number, number] | null = $state.raw(null);
   let categoryCount: number = $state.raw(1);
   let totalCount: number = $state.raw(1);
   let maxDensity: number = $state.raw(1);
@@ -342,6 +348,17 @@
       const precomputedYIsMerc =
         packed && precomputedCols != null && (precomputedCols as { y_is_mercator?: boolean }).y_is_mercator === true;
       yIsAlreadyMercator = gisProjectInQuery || precomputedYIsMerc;
+      // Wire-precision origin (Path C only): subtracted in f64 server-side
+      // before the ::FLOAT cast; folded back by the renderer. y is in
+      // Mercator space on this path, so project the hint's center too.
+      let queryOffset: [number, number] | null = null;
+      if (gisProjectInQuery && viewportHint != null) {
+        const cx = viewportHint.centerX;
+        const mercCy = (Math.log(Math.tan(Math.PI / 4 + (viewportHint.centerY * Math.PI) / 360)) * 180) / Math.PI;
+        if (isFinite(cx) && isFinite(mercCy)) {
+          queryOffset = [cx, mercCy];
+        }
+      }
       client = makeClient({
         coordinator: deps.coordinator,
         selection: filter ?? undefined,
@@ -373,16 +390,24 @@
             xExpr = SQL.sql`((COALESCE(${SQL.column(source.x)}, ${xMin}) - ${xMin}) * ${xScale})::UINTEGER`;
             yExpr = SQL.sql`((COALESCE(${SQL.column(source.y)}, ${yMin}) - ${yMin}) * ${yScale})::UINTEGER`;
           } else {
-            xExpr = SQL.sql`${SQL.column(source.x)}::FLOAT`;
             // Server-side Mercator projection (GIS Path C only). Saves
             // ~1.8 s on 75 M-row cold loads — DuckDB's vectorised
             // tan/log is C-level fast, while the equivalent JS loop
             // single-threads through ``Math.tan`` 75 M times.
             // ``yIsAlreadyMercator`` tells ``EmbeddingViewImpl`` to
             // skip its own projection so we don't double-project.
-            yExpr = gisProjectInQuery
-              ? SQL.sql`(LN(TAN(PI()/4 + ${SQL.column(source.y)} * PI() / 360))*180/PI())::FLOAT`
-              : SQL.sql`${SQL.column(source.y)}::FLOAT`;
+            // ``queryOffset`` (when set) is subtracted in f64 BEFORE the
+            // f32 cast so street-zoom precision survives the wire — the
+            // renderer's ``positionOffset`` folds it back.
+            if (queryOffset != null) {
+              xExpr = SQL.sql`(${SQL.column(source.x)} - ${queryOffset[0]})::FLOAT`;
+              yExpr = SQL.sql`(LN(TAN(PI()/4 + ${SQL.column(source.y)} * PI() / 360))*180/PI() - ${queryOffset[1]})::FLOAT`;
+            } else {
+              xExpr = SQL.sql`${SQL.column(source.x)}::FLOAT`;
+              yExpr = gisProjectInQuery
+                ? SQL.sql`(LN(TAN(PI()/4 + ${SQL.column(source.y)} * PI() / 360))*180/PI())::FLOAT`
+                : SQL.sql`${SQL.column(source.y)}::FLOAT`;
+            }
           }
           return SQL.Query.from(source.table)
             .select({
@@ -513,6 +538,8 @@
           coordsBoundsY = nextBoundsY;
           xData = nextX;
           yData = nextY;
+          // Keep the offset in lock-step with the arrays it applies to.
+          positionOffset = nextXPacked != null ? null : queryOffset;
           categoryData = categoryArray;
           updateTooltip(null);
           updateSelection(null);
@@ -986,6 +1013,7 @@
     coordsBoundsX: coordsBoundsX,
     coordsBoundsY: coordsBoundsY,
     category: categoryData,
+    positionOffset: positionOffset,
   }}
   yIsAlreadyMercator={yIsAlreadyMercator}
   totalCount={totalCount}

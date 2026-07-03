@@ -10,6 +10,9 @@ function shaderSource(hasCategory: boolean) {
     vertex = `#version 300 es
       precision highp float;
       uniform mat3 matrix;
+      // camera-relative origin (folded into the matrix in f64 on the CPU);
+      // subtracting it before the multiply avoids deep-zoom f32 drift
+      uniform vec2 origin;
       uniform float point_size;
       uniform float alpha;
       uniform vec4 colorScheme[64];
@@ -24,7 +27,7 @@ function shaderSource(hasCategory: boolean) {
       out float survivor;
 
       void main() {
-        gl_Position = vec4(matrix * vec3(x, y, 1), 1);
+        gl_Position = vec4(matrix * vec3(x - origin.x, y - origin.y, 1), 1);
         // bit 7 of the category byte = survivor flag, bits 0-6 = category index.
         // The attribute is a signed BYTE, so mask before use (bit 7 => negative).
         int cat = category & 0x7F;
@@ -43,6 +46,7 @@ function shaderSource(hasCategory: boolean) {
     vertex = `#version 300 es
       precision highp float;
       uniform mat3 matrix;
+      uniform vec2 origin;
       uniform float point_size;
       uniform vec4 colorScheme;
       uniform float alpha;
@@ -54,7 +58,7 @@ function shaderSource(hasCategory: boolean) {
       out float survivor;
 
       void main() {
-        gl_Position = vec4(matrix * vec3(x, y, 1), 1);
+        gl_Position = vec4(matrix * vec3(x - origin.x, y - origin.y, 1), 1);
         color = colorScheme;
         color *= alpha;
         survivor = 0.0;
@@ -88,6 +92,7 @@ function shaderSource(hasCategory: boolean) {
 
 type PaintDiscretePointsCommand = (
   matrix: Matrix3,
+  origin: [number, number],
   pointSize: number,
   alpha: number,
   colors: number[],
@@ -107,7 +112,7 @@ export function paintDiscretePointsCommand(
   let program = df.statefulDerive([gl, source.vertex, source.fragment], webglProgram);
   return df.derive(
     [gl, program, x, y, category, count],
-    (gl, program, x, y, category, count) => (matrix, radius, alpha, colors, ringWidth) => {
+    (gl, program, x, y, category, count) => (matrix, origin, radius, alpha, colors, ringWidth) => {
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -127,6 +132,9 @@ export function paintDiscretePointsCommand(
       gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
       gl.uniformMatrix3fv(program.uniforms.matrix, false, matrix);
+      if (program.uniforms.origin != null) {
+        gl.uniform2f(program.uniforms.origin, origin[0], origin[1]);
+      }
       gl.uniform1f(program.uniforms.point_size, radius * 2);
       gl.uniform1f(program.uniforms.alpha, alpha);
       if (program.uniforms.ring_width != null) {

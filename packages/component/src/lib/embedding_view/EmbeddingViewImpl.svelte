@@ -11,6 +11,11 @@
       coordsBoundsX?: [number, number] | null;
       coordsBoundsY?: [number, number] | null;
       category: Uint8Array<ArrayBuffer> | null;
+      /** When set, ``x``/``y`` are stored relative to this data-space
+       *  origin (subtracted server-side in f64 before the f32 cast for
+       *  street-zoom precision). Forwarded to the renderer, which folds
+       *  it back into its transform in f64. */
+      positionOffset?: [number, number] | null;
     };
     /** Set when the parent already projected ``data.y`` to Mercator on
      *  the server (GIS Path C optimisation). The internal projection
@@ -625,6 +630,7 @@
       yPacked: data.yPacked ?? null,
       coordsBoundsX: data.coordsBoundsX ?? null,
       coordsBoundsY: data.coordsBoundsY ?? null,
+      positionOffset: data.positionOffset ?? null,
       category: data.category,
       categoryCount,
       categoryColors: resolvedCategoryColors,

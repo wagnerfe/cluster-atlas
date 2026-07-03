@@ -22,6 +22,9 @@ export interface Uniforms {
   survivor_ring_width: number;
   matrix: Matrix3;
   view_xy_scaler: Vector2;
+  /** Camera-relative rendering origin (f32-snapped, already folded into
+   *  ``matrix`` on the CPU — see matrix3_rebase_f32_origin). */
+  origin: Vector2;
   kde_causal: Vector4;
   kde_anticausal: Vector4;
   kde_a: Vector4;
@@ -133,6 +136,9 @@ export function makeModuleUniforms(df: Dataflow, device: Node<GPUDevice>): Modul
       writer.f32(uniforms.survivor_ring_width);
       writer.mat3x3f(uniforms.matrix);
       writer.vec2f(...uniforms.view_xy_scaler);
+      // Fills the former padding hole before kde_causal (vec4 aligns to 16
+      // bytes), so total struct size and downstream offsets are unchanged.
+      writer.vec2f(...uniforms.origin);
       writer.vec4f(...uniforms.kde_causal);
       writer.vec4f(...uniforms.kde_anticausal);
       writer.vec4f(...uniforms.kde_a);

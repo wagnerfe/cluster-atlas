@@ -3,9 +3,11 @@
 import { defaultCategoryColors, parseColorNormalizedRgb } from "../colors.js";
 import { Dataflow, Node, ValueNode } from "../dataflow.js";
 import {
+  matrix3_fold_translation,
   matrix3_identity,
   matrix3_inverse,
   matrix3_matrix_mul_matrix,
+  matrix3_rebase_f32_origin,
   matrix3_vector_mul_matrix,
   type Matrix3,
   type Vector4,
@@ -161,6 +163,7 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
       downsampleDensityWeight: 5,
       isGis: false,
       skipDownsampleCompute: false,
+      positionOffset: null,
     };
 
     this.viewport = new Viewport({ x: 0, y: 0, scale: 1 }, width, height);
@@ -273,7 +276,12 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
     } else {
       this.renderInputs.categoryCount.value = 1;
     }
-    this.renderInputs.matrix.value = this.viewport.matrix();
+    // ``positionOffset`` marks x/y as stored relative to that data-space
+    // origin (higher f32 wire precision); fold it back in f64 so the GPU
+    // matrix maps stored coords exactly like true coords.
+    const off = this.props.positionOffset;
+    this.renderInputs.matrix.value =
+      off != null ? matrix3_fold_translation(this.viewport.matrix(), off[0], off[1]) : this.viewport.matrix();
     this.renderInputs.width.value = this.props.width;
     this.renderInputs.height.value = this.props.height;
     this.renderInputs.pointSize.value = this.props.pointSize;
@@ -409,7 +417,11 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
   async densityMap(width: number, height: number, radius: number, viewportState: ViewportState): Promise<DensityMap> {
     let subgraph = this.df.subgraph();
     let { x, y, scale: s } = viewportState;
-    let positionMatrix: Matrix3 = [s, 0, 0, 0, s, 0, -x * s, -y * s, 1];
+    // viewportState speaks true data space; the buffers may be stored
+    // relative to positionOffset — fold it so the GPU matrix matches, and
+    // add it back when converting pixels to (true) data coordinates.
+    const [offX, offY] = this.props.positionOffset ?? [0, 0];
+    let positionMatrix: Matrix3 = matrix3_fold_translation([s, 0, 0, 0, s, 0, -x * s, -y * s, 1], offX, offY);
     let inv_matrix = matrix3_inverse(positionMatrix);
     let cmd = makeDensityMapCommand(
       subgraph,
@@ -433,7 +445,8 @@ export class EmbeddingRendererWebGPU implements EmbeddingRenderer {
         let tx = (x / width) * 2 - 1;
         let ty = (y / height) * 2 - 1;
         let r = matrix3_vector_mul_matrix([tx, ty, 1], inv_matrix);
-        return { x: r[0], y: isGis ? Viewport.unprojectLat(r[1]) : r[1] };
+        let yTrue = r[1] + offY;
+        return { x: r[0] + offX, y: isGis ? Viewport.unprojectLat(yTrue) : yTrue };
       },
     };
   }
@@ -678,7 +691,12 @@ function makeRenderCommand(
         let scalerX = props.width / fbWidth;
         let scalerY = props.height / fbHeight;
         let safeMarginAdjustmentMatrix: Matrix3 = [scalerX, 0, 0, 0, scalerY, 0, 0, 0, 1];
-        let matrix = matrix3_matrix_mul_matrix(safeMarginAdjustmentMatrix, positionMatrix);
+        // Camera-relative rebase: keep the f32 uniform values small so deep
+        // zoom doesn't round the transform by whole pixels (see
+        // matrix3_rebase_f32_origin). get_point subtracts `origin`.
+        let { matrix, origin } = matrix3_rebase_f32_origin(
+          matrix3_matrix_mul_matrix(safeMarginAdjustmentMatrix, positionMatrix),
+        );
         updateUniforms({
           count: count,
           category_count: props.categoryCount,
@@ -697,6 +715,7 @@ function makeRenderCommand(
           contours_alpha: props.contoursAlpha,
           matrix: matrix,
           view_xy_scaler: [1 / scalerX, 1 / scalerY],
+          origin: origin,
           kde_causal: kde_coeffs.kde_causal,
           kde_anticausal: kde_coeffs.kde_anticausal,
           kde_a: kde_coeffs.kde_a,
@@ -871,6 +890,7 @@ function makeDensityMapCommand(
     (device, width, height, count, updateUniforms, radius, matrix, accumulate, gaussianBlur, countBuffer) => () => {
       let encoder = device.createCommandEncoder();
       let kde_coeffs = kdeConfig(radius);
+      let rebased = matrix3_rebase_f32_origin(matrix);
       updateUniforms({
         count: count,
         category_count: 1,
@@ -887,8 +907,9 @@ function makeDensityMapCommand(
         quantization_step: 0,
         density_alpha: 0,
         contours_alpha: 0,
-        matrix: matrix,
+        matrix: rebased.matrix,
         view_xy_scaler: [1, 1],
+        origin: rebased.origin,
         kde_causal: kde_coeffs.kde_causal,
         kde_anticausal: kde_coeffs.kde_anticausal,
         kde_a: kde_coeffs.kde_a,
