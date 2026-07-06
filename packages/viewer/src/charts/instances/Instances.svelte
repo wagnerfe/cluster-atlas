@@ -60,26 +60,28 @@
   let basketEnabled = $derived(context.columns.some((c) => c.name === "cluster_id"));
   let basketCount = $state.raw(0);
   let basketBusy = $state(false);
-  let filterActive = $state(false);
 
-  // The active cross-filter predicate (cluster_id IN (…) after a map click, plus
-  // any brush). null when nothing is selected. May be a single expr or an array
-  // of exprs (crossfilter) — both are accepted by SQL.Query.where().
-  function activePredicate(): any {
-    let p = context.filter.predicate(null);
-    if (p == null) {
-      return null;
-    }
-    if (Array.isArray(p) && p.length == 0) {
-      return null;
-    }
-    return p;
+  // Extract just the ``cluster_id`` clause(s) from the shared cross-filter,
+  // dropping any spatial marquee/lasso brush. The map wires
+  // rangeSelection={context.filter}, so a brush publishes into the same filter
+  // and — because clusters are tiny (a brushed region spans thousands) — using
+  // the whole filter would blow "Add cluster" up to tens of thousands of rows.
+  // Matching on the column name is enough: the brush clause references the x/y
+  // columns, not cluster_id. Reading the clause (rather than context.highlight)
+  // also survives the highlight-clearing re-query that a click triggers.
+  function clusterPredicate(): any {
+    let clauses = (context.filter as any).clauses ?? [];
+    let preds = clauses
+      .map((c: any) => c?.predicate)
+      .filter((p: any) => p != null && String(p).includes("cluster_id"));
+    return preds.length > 0 ? preds : null;
   }
 
-  // Track whether something is selected so the "Add cluster" button can disable.
+  // Reactive flag driving the "Add cluster" button's enabled state.
+  let clusterSelectionActive = $state(false);
   $effect.pre(() => {
     let update = () => {
-      filterActive = activePredicate() != null;
+      clusterSelectionActive = clusterPredicate() != null;
     };
     update();
     context.filter.addEventListener("value", update);
@@ -130,12 +132,14 @@
     "base_emails",
   ];
   async function addClusterToBasket() {
-    let pred = activePredicate();
+    let pred = clusterPredicate();
     if (!basketEnabled || basketBusy || pred == null) {
       return;
     }
     basketBusy = true;
     try {
+      // The clause is ``cluster_id IN (…)`` for the clicked cluster(s), so the
+      // matching points already form whole clusters (no brush involved).
       let pointsSub = String(SQL.Query.from(context.table).select("id", "cluster_id").where(pred));
       // Front columns are listed explicitly first, then EXCLUDE'd from ``l.*`` so
       // they are not duplicated; the drop columns are EXCLUDE'd outright.
@@ -187,23 +191,56 @@
     }
   }
 
-  // Export the basket via the server's /data/selection COPY-to-parquet endpoint
-  // (same origin as the page; the API is mounted under /data).
-  async function downloadBasket() {
+  // Flattened projection for the CSV export: the annotation/id columns plus the
+  // first value of each nested field (structs by field name, lists by [1]).
+  const BASKET_CSV_SELECT = `
+    SELECT
+      label, id, base_id, composite_score,
+      names."primary"            AS "names.primary",
+      base_names."primary"       AS "base_names.primary",
+      addresses[1].freeform      AS "addresses.freeform",
+      base_addresses[1].freeform AS "base_addresses.freeform",
+      taxonomy."primary"         AS "taxonomy.primary",
+      base_taxonomy."primary"    AS "base_taxonomy.primary",
+      websites[1]                AS "websites[0]",
+      base_websites[1]           AS "base_websites[0]",
+      socials[1]                 AS "socials[0]",
+      base_socials[1]            AS "base_socials[0]",
+      emails[1]                  AS "emails[0]",
+      base_emails[1]             AS "base_emails[0]"
+    FROM ${BASKET_TABLE}`;
+
+  // Export the basket via the server's /data/selection COPY endpoint (same
+  // origin as the page; the API is mounted under /data). Parquet exports the
+  // full basket table as-is; CSV exports the flattened projection above.
+  async function downloadBasket(format: "parquet" | "csv") {
     if (basketBusy || basketCount == 0) {
       return;
     }
     basketBusy = true;
     try {
-      let resp = await fetch(new URL("data/selection", document.baseURI), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ table: BASKET_TABLE, format: "parquet" }),
-      });
-      if (!resp.ok) {
-        throw new Error(`basket export failed: ${resp.status}`);
+      let table = BASKET_TABLE;
+      let tempTable: string | null = null;
+      if (format === "csv") {
+        tempTable = `${BASKET_TABLE}_csv`;
+        await context.coordinator.exec(`CREATE OR REPLACE TABLE ${tempTable} AS ${BASKET_CSV_SELECT}`);
+        table = tempTable;
       }
-      downloadBuffer(await resp.arrayBuffer(), "cluster-basket.parquet");
+      try {
+        let resp = await fetch(new URL("data/selection", document.baseURI), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ table, format }),
+        });
+        if (!resp.ok) {
+          throw new Error(`basket export failed: ${resp.status}`);
+        }
+        downloadBuffer(await resp.arrayBuffer(), `cluster-basket.${format}`);
+      } finally {
+        if (tempTable) {
+          await context.coordinator.exec(`DROP TABLE IF EXISTS ${tempTable}`);
+        }
+      }
     } finally {
       basketBusy = false;
     }
@@ -515,10 +552,11 @@
         </span>
         <Button
           label="Add cluster"
-          disabled={basketBusy || !filterActive}
+          disabled={basketBusy || !clusterSelectionActive}
           onClick={addClusterToBasket}
         />
-        <Button label="Download" disabled={basketBusy || basketCount == 0} onClick={downloadBasket} />
+        <Button label="Parquet" disabled={basketBusy || basketCount == 0} onClick={() => downloadBasket("parquet")} />
+        <Button label="CSV" disabled={basketBusy || basketCount == 0} onClick={() => downloadBasket("csv")} />
         <Button label="Clear" disabled={basketBusy || basketCount == 0} onClick={clearBasket} />
       </div>
     {/if}
