@@ -50,38 +50,110 @@
   let defaultColumnWidths = $state.raw<Record<string, number>>({});
 
   // ---- Cluster basket (matcher-eval) -------------------------------------
-  // Accumulate the match lines of the clusters the user picks (via the map's
-  // click-to-filter) into a server-side table, then download it as parquet. Each
-  // row carries the ``lines`` columns (minus the rendering-only endpoint coords /
-  // match_pair_type) plus ``cluster_id`` and the empty ``label`` / ``label_quality``
-  // annotation columns. Only shown when a ``cluster_id`` column is present (the
-  // prebuilt matcher-eval format), which also guarantees the ``lines`` table exists.
+  // Accumulate the match lines touched by the current active selection into a
+  // DuckDB table, then download it as parquet/CSV. The
+  // exported table is a full pairwise labelling file: every row is one line
+  // pair, carrying all line columns plus all point-table columns for both
+  // endpoints. The first endpoint keeps the point column names; the second
+  // endpoint gets a `base_` prefix. The table is built dynamically from the
+  // current schemas, so new notebook columns become export columns automatically.
   const BASKET_TABLE = "__cluster_basket";
   let basketEnabled = $derived(context.columns.some((c) => c.name === "cluster_id"));
   let basketCount = $state.raw(0);
   let basketBusy = $state(false);
 
-  // Extract just the ``cluster_id`` clause(s) from the shared cross-filter,
-  // dropping any spatial marquee/lasso brush. The map wires
-  // rangeSelection={context.filter}, so a brush publishes into the same filter
-  // and — because clusters are tiny (a brushed region spans thousands) — using
-  // the whole filter would blow "Add cluster" up to tens of thousands of rows.
-  // Matching on the column name is enough: the brush clause references the x/y
-  // columns, not cluster_id. Reading the clause (rather than context.highlight)
-  // also survives the highlight-clearing re-query that a click triggers.
-  function clusterPredicate(): any {
-    let clauses = (context.filter as any).clauses ?? [];
-    let preds = clauses
-      .map((c: any) => c?.predicate)
-      .filter((p: any) => p != null && String(p).includes("cluster_id"));
-    return preds.length > 0 ? preds : null;
+  function quoteIdent(name: string): string {
+    return `"${name.replaceAll('"', '""')}"`;
   }
 
-  // Reactive flag driving the "Add cluster" button's enabled state.
-  let clusterSelectionActive = $state(false);
+  async function tableColumnNames(table: string): Promise<string[]> {
+    let rows = Array.from(await context.coordinator.query(`DESCRIBE ${quoteIdent(table)}`));
+    return rows.map((row: any) => String(row.column_name));
+  }
+
+  function uniqueAlias(preferred: string, fallbackPrefix: string, used: Set<string>): string {
+    let candidate = preferred;
+    if (used.has(candidate)) {
+      candidate = `${fallbackPrefix}${preferred}`;
+    }
+    let i = 2;
+    let base = candidate;
+    while (used.has(candidate)) {
+      candidate = `${base}_${i}`;
+      i += 1;
+    }
+    used.add(candidate);
+    return candidate;
+  }
+
+  function endpointOrigin(index: 1 | 2): string {
+    return `split_part(l."match_pair_type", '->', ${index})`;
+  }
+
+  function lineKeyPredicate(lineColumns: string[]): string {
+    let keyColumns = ["id", "base_id", "match_pair_type", "line_status"].filter((c) => lineColumns.includes(c));
+    return keyColumns
+      .map((c) => {
+        let col = quoteIdent(c);
+        return `(b.${col} = l.${col} OR (b.${col} IS NULL AND l.${col} IS NULL))`;
+      })
+      .join(" AND ");
+  }
+
+  function basketSelectList(lineColumns: string[], pointColumns: string[]): string[] {
+    let used = new Set<string>();
+    let select = [
+      `CAST(NULL AS INTEGER) AS ${quoteIdent("label")}`,
+      `CAST(1 AS INTEGER) AS ${quoteIdent("label_quality")}`,
+    ];
+    used.add("label");
+    used.add("label_quality");
+
+    // Keep all columns from the line table, including coordinates and scores.
+    for (let col of lineColumns) {
+      let alias = uniqueAlias(col, "line_", used);
+      select.push(`l.${quoteIdent(col)} AS ${quoteIdent(alias)}`);
+    }
+
+    // `cluster_id` is the pair/cluster id users expect from the old basket. It
+    // is the first non-null endpoint cluster id. The endpoint-specific second
+    // value is still exported below as `base_cluster_id`.
+    if (pointColumns.includes("cluster_id")) {
+      let alias = uniqueAlias("cluster_id", "point_", used);
+      select.push(`COALESCE(p.${quoteIdent("cluster_id")}, bp.${quoteIdent("cluster_id")}) AS ${quoteIdent(alias)}`);
+    }
+
+    for (let col of pointColumns) {
+      if (col === "id" || col === "cluster_id") {
+        continue;
+      }
+      let alias = uniqueAlias(col, "point_", used);
+      select.push(`p.${quoteIdent(col)} AS ${quoteIdent(alias)}`);
+    }
+
+    for (let col of pointColumns) {
+      if (col === "id") {
+        continue;
+      }
+      let alias = uniqueAlias(`base_${col}`, "base_point_", used);
+      select.push(`bp.${quoteIdent(col)} AS ${quoteIdent(alias)}`);
+    }
+
+    return select;
+  }
+
+  // Use the full active cross-filter selection. This intentionally accepts
+  // cluster clicks, legend selections, count plots, predicates, brush/lasso, and
+  // any other chart that publishes to the shared filter.
+  function activePredicate(): any {
+    return context.filter.predicate(null) ?? null;
+  }
+
+  // Reactive flag driving the "Add selection" button's enabled state.
+  let selectionActive = $state(false);
   $effect.pre(() => {
     let update = () => {
-      clusterSelectionActive = clusterPredicate() != null;
+      selectionActive = activePredicate() != null;
     };
     update();
     context.filter.addEventListener("value", update);
@@ -106,58 +178,50 @@
     }
   });
 
-  // Add the currently-selected cluster's match lines to the basket. Each row is
-  // one ``lines`` row scoped to the cluster by joining to the points that pass
-  // the active filter, enriched with the point's ``cluster_id``; deduped on
-  // (id, base_id). The rendering-only geometry columns (lon/lat endpoints,
-  // match_pair_type) are dropped, and two annotation columns are added for the
-  // downstream labelling pass: ``label`` (empty, to be filled with 1/0) and
-  // ``label_quality`` (defaults to 1).
-  const BASKET_DROP_COLUMNS = ["lon1", "lon2", "lat1", "lat2", "match_pair_type"];
-  // Columns pulled to the front of the exported parquet, in this order (they are
-  // still kept — just reordered); the remaining ``lines`` columns follow in their
-  // natural order. Names must exist in the enriched lines schema.
-  const BASKET_FRONT_COLUMNS = [
-    "composite_score",
-    "names",
-    "base_names",
-    "addresses",
-    "base_addresses",
-    "taxonomy",
-    "base_taxonomy",
-    "websites",
-    "base_websites",
-    "socials",
-    "base_socials",
-    "emails",
-    "base_emails",
-  ];
+  async function basketInsertSql(pred: any): Promise<{ shape: string; insert: string }> {
+    let lineColumns = await tableColumnNames("lines");
+    let pointColumns = context.columns.map((c) => c.name).filter((name) => !name.startsWith("__"));
+    let selectList = basketSelectList(lineColumns, pointColumns).join(",\n          ");
+    let selectedPointsSub = String(
+      SQL.Query.from(context.table).select("id", "origin", "cluster_id").where(pred),
+    );
+    let selectedEndpointExists = `EXISTS (
+          SELECT 1 FROM (${selectedPointsSub}) sp
+          WHERE (sp."id" = l."id" AND sp."origin" = ${endpointOrigin(1)})
+             OR (sp."id" = l."base_id" AND sp."origin" = ${endpointOrigin(2)})
+        )`;
+    let joins = `
+        FROM "lines" l
+        LEFT JOIN ${quoteIdent(context.table)} p
+          ON p."id" = l."id"
+         AND p."origin" = ${endpointOrigin(1)}
+        LEFT JOIN ${quoteIdent(context.table)} bp
+          ON bp."id" = l."base_id"
+         AND bp."origin" = ${endpointOrigin(2)}`;
+    let shape = `SELECT
+          ${selectList}
+        ${joins}
+        WHERE FALSE`;
+    let keyPredicate = lineKeyPredicate(lineColumns);
+    let insert = `INSERT INTO ${BASKET_TABLE}
+        SELECT DISTINCT
+          ${selectList}
+        ${joins}
+        WHERE ${selectedEndpointExists}
+          AND NOT EXISTS (
+            SELECT 1 FROM ${BASKET_TABLE} b WHERE ${keyPredicate}
+          );`;
+    return { shape, insert };
+  }
+
   async function addClusterToBasket() {
-    let pred = clusterPredicate();
+    let pred = activePredicate();
     if (!basketEnabled || basketBusy || pred == null) {
       return;
     }
     basketBusy = true;
     try {
-      // The clause is ``cluster_id IN (…)`` for the clicked cluster(s), so the
-      // matching points already form whole clusters (no brush involved).
-      let pointsSub = String(SQL.Query.from(context.table).select("id", "cluster_id").where(pred));
-      // Front columns are listed explicitly first, then EXCLUDE'd from ``l.*`` so
-      // they are not duplicated; the drop columns are EXCLUDE'd outright.
-      let front = BASKET_FRONT_COLUMNS.map((c) => `l."${c}"`).join(", ");
-      let exclude = `EXCLUDE (${[...BASKET_FRONT_COLUMNS, ...BASKET_DROP_COLUMNS].join(", ")})`;
-      let extra = `p."cluster_id" AS cluster_id,
-        CAST(NULL AS INTEGER) AS label,
-        CAST(1 AS INTEGER) AS label_quality`;
-      let shape = `SELECT ${front}, l.* ${exclude}, ${extra}
-        FROM "lines" l JOIN "${context.table}" p ON l."id" = p."id" WHERE FALSE`;
-      let insert = `INSERT INTO ${BASKET_TABLE}
-        SELECT DISTINCT ${front}, l.* ${exclude}, ${extra}
-        FROM "lines" l
-        JOIN (${pointsSub}) p ON l."id" = p."id"
-        WHERE NOT EXISTS (
-          SELECT 1 FROM ${BASKET_TABLE} b WHERE b."id" = l."id" AND b."base_id" = l."base_id"
-        );`;
+      let { shape, insert } = await basketInsertSql(pred);
       try {
         await context.coordinator.exec(`
           CREATE TABLE IF NOT EXISTS ${BASKET_TABLE} AS ${shape};
@@ -192,56 +256,24 @@
     }
   }
 
-  // Flattened projection for the CSV export: the annotation/id columns plus the
-  // first value of each nested field (structs by field name, lists by [1]).
-  const BASKET_CSV_SELECT = `
-    SELECT
-      label, id, base_id, composite_score,
-      names."primary"            AS "names.primary",
-      base_names."primary"       AS "base_names.primary",
-      addresses[1].freeform      AS "addresses.freeform",
-      base_addresses[1].freeform AS "base_addresses.freeform",
-      taxonomy."primary"         AS "taxonomy.primary",
-      base_taxonomy."primary"    AS "base_taxonomy.primary",
-      websites[1]                AS "websites[0]",
-      base_websites[1]           AS "base_websites[0]",
-      socials[1]                 AS "socials[0]",
-      base_socials[1]            AS "base_socials[0]",
-      emails[1]                  AS "emails[0]",
-      base_emails[1]             AS "base_emails[0]"
-    FROM ${BASKET_TABLE}`;
-
   // Export the basket via the server's /data/selection COPY endpoint (same
-  // origin as the page; the API is mounted under /data). Parquet exports the
-  // full basket table as-is; CSV exports the flattened projection above.
+  // origin as the page; the API is mounted under /data). Parquet preserves the
+  // full nested pairwise schema; CSV serialises the same columns for quick looks.
   async function downloadBasket(format: "parquet" | "csv") {
     if (basketBusy || basketCount == 0) {
       return;
     }
     basketBusy = true;
     try {
-      let table = BASKET_TABLE;
-      let tempTable: string | null = null;
-      if (format === "csv") {
-        tempTable = `${BASKET_TABLE}_csv`;
-        await context.coordinator.exec(`CREATE OR REPLACE TABLE ${tempTable} AS ${BASKET_CSV_SELECT}`);
-        table = tempTable;
+      let resp = await fetch(new URL("data/selection", document.baseURI), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ table: BASKET_TABLE, format }),
+      });
+      if (!resp.ok) {
+        throw new Error(`basket export failed: ${resp.status}`);
       }
-      try {
-        let resp = await fetch(new URL("data/selection", document.baseURI), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ table, format }),
-        });
-        if (!resp.ok) {
-          throw new Error(`basket export failed: ${resp.status}`);
-        }
-        downloadBuffer(await resp.arrayBuffer(), `cluster-basket.${format}`);
-      } finally {
-        if (tempTable) {
-          await context.coordinator.exec(`DROP TABLE IF EXISTS ${tempTable}`);
-        }
-      }
+      downloadBuffer(await resp.arrayBuffer(), `cluster-basket.${format}`);
     } finally {
       basketBusy = false;
     }
@@ -552,8 +584,8 @@
           Basket: {basketCount.toLocaleString()} pairs
         </span>
         <Button
-          label="Add cluster"
-          disabled={basketBusy || !clusterSelectionActive}
+          label="Add selection"
+          disabled={basketBusy || !selectionActive}
           onClick={addClusterToBasket}
         />
         <Button label="Parquet" disabled={basketBusy || basketCount == 0} onClick={() => downloadBasket("parquet")} />
