@@ -118,6 +118,7 @@
   // still kept — just reordered); the remaining ``lines`` columns follow in their
   // natural order. Names must exist in the enriched lines schema.
   const BASKET_FRONT_COLUMNS = [
+    "composite_score",
     "names",
     "base_names",
     "addresses",
