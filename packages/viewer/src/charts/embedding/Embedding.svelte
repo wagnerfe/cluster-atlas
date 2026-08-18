@@ -77,7 +77,13 @@
   // ``cluster_id IN (…)`` clause to the global cross-filter so only that
   // point's cluster stays visible (and, since the Match-Lines client reads the
   // same filter, only that cluster's lines draw). Clicking empty map clears it.
+  // Run-comparison datasets also carry the OLD run's cluster ids: those are
+  // folded into the clause (``cluster_id IN (…) OR cluster_id_old IN (…)``) so
+  // removed lines — whose endpoints often have no new-run cluster — stay
+  // visible and clickable. The two id spaces are kept separate: new-run ids
+  // only ever match ``cluster_id``, old-run ids only ``cluster_id_old``.
   const CLUSTER_FILTER_COLUMN = "cluster_id";
+  const CLUSTER_FILTER_COLUMN_OLD = "cluster_id_old";
 
   let {
     context,
@@ -141,19 +147,25 @@
   let clusterFilterEnabled = $derived(
     spec.data.lines != null && context.columns.some((c) => c.name === CLUSTER_FILTER_COLUMN),
   );
+  // Old-run cluster ids (run-comparison datasets only).
+  let clusterFilterOldEnabled = $derived(
+    clusterFilterEnabled && context.columns.some((c) => c.name === CLUSTER_FILTER_COLUMN_OLD),
+  );
 
   // Survivor ring — only in matcher-eval views (lines present) that carry a
   // ``survivor`` column: points with survivor=1 get a light-red outer ring.
   let survivorColumn = $derived(
     spec.data.lines != null && context.columns.some((c) => c.name === "survivor") ? "survivor" : null,
   );
-  // The cluster id(s) currently filtered to (null = show all). Held as state so
+  // The cluster target currently filtered to (null = show all): new-run ids
+  // and (comparison datasets) old-run ids, each matched only against its own
+  // column. Held as state so
   // the actual context.filter mutation happens in the reactive effect below, at
   // a clean tick — NOT synchronously inside onSelection. Updating the Selection
   // re-entrantly from that callback (it fires during the data client's
   // queryResult cascade) made the table miss the first click; publishing from a
   // $effect.pre is the same pattern Legend.svelte uses, and it is reliable.
-  let clusterFilterIds = $state.raw<any[] | null>(null);
+  let clusterFilterIds = $state.raw<{ ids: any[]; oldIds: any[] } | null>(null);
 
   function publishClusterClause(predicate: any, value: any) {
     context.filter.update({
@@ -171,8 +183,11 @@
   //     would clear itself the instant it took effect (points flash then return).
   //   - ``[]``    → the user clicked empty map. Clear the filter (show all).
   //   - [p, …]    → the user clicked point(s); filter to their cluster(s).
-  //     Multi-select (shift/⌘-click) unions the clusters. Points with no
-  //     cluster_id (unmatched) leave the current target unchanged.
+  //     Multi-select (shift/⌘-click) unions the clusters. On comparison
+  //     datasets a point's old-run cluster id counts too, so clicking a point
+  //     that lost its match (null ``cluster_id``, e.g. a removed line's
+  //     endpoint) filters to its old cluster instead of being ignored. Points
+  //     with no cluster id in either run leave the current target unchanged.
   function updateClusterFilter(points: DataPoint[] | null) {
     if (!clusterFilterEnabled || points == null) {
       return;
@@ -182,9 +197,13 @@
       return;
     }
     let ids = points.map((p) => p?.fields?.[CLUSTER_FILTER_COLUMN]).filter((v) => v != null);
+    let oldIds = clusterFilterOldEnabled
+      ? points.map((p) => p?.fields?.[CLUSTER_FILTER_COLUMN_OLD]).filter((v) => v != null)
+      : [];
     let distinct = Array.from(new Set(ids));
-    if (distinct.length > 0) {
-      clusterFilterIds = distinct;
+    let distinctOld = Array.from(new Set(oldIds));
+    if (distinct.length > 0 || distinctOld.length > 0) {
+      clusterFilterIds = { ids: distinct, oldIds: distinctOld };
     }
   }
 
@@ -194,15 +213,26 @@
     if (!clusterFilterEnabled) {
       return;
     }
-    let ids = clusterFilterIds;
-    if (ids != null && ids.length > 0) {
-      publishClusterClause(
-        SQL.isIn(
-          SQL.column(CLUSTER_FILTER_COLUMN),
-          ids.map((v) => SQL.literal(v)),
-        ),
-        ids,
-      );
+    let target = clusterFilterIds;
+    if (target != null && (target.ids.length > 0 || target.oldIds.length > 0)) {
+      let clauses = [];
+      if (target.ids.length > 0) {
+        clauses.push(
+          SQL.isIn(
+            SQL.column(CLUSTER_FILTER_COLUMN),
+            target.ids.map((v) => SQL.literal(v)),
+          ),
+        );
+      }
+      if (target.oldIds.length > 0) {
+        clauses.push(
+          SQL.isIn(
+            SQL.column(CLUSTER_FILTER_COLUMN_OLD),
+            target.oldIds.map((v) => SQL.literal(v)),
+          ),
+        );
+      }
+      publishClusterClause(clauses.length > 1 ? SQL.or(...clauses) : clauses[0], target);
     } else {
       publishClusterClause(null, null);
     }
