@@ -81,6 +81,20 @@
   // `requestQuery()`. Lines are <=400 m, so a gated viewport holds a bounded
   // number; the cap guards against a pathologically dense metro.
   const LINES_VIEWPORT_CAP = 50000;
+  // Retention priority under the viewport cap: when more lines fall in the
+  // bbox than LIMIT keeps, drop the boring ones (stable / baseline->baseline)
+  // first so diff and match lines always survive. Lower sorts first = kept
+  // first. Unlisted pair types keep middle priority. The DRAW order (which
+  // twin shows when identical geometries overlap) is the renderer's job — see
+  // ``renderedMatchLines`` in EmbeddingViewImpl.
+  const LINES_KEEP_PRIORITY: Record<string, number> = {
+    removed: 0,
+    added: 1,
+    "candidate->baseline": 2,
+    "candidate->candidate": 3,
+    "baseline->baseline": 5,
+    stable: 6,
+  };
   type LineRow = { x1: number; y1: number; x2: number; y2: number; pairType: string | null };
 
   let lineRows = $state.raw<LineRow[]>([]);
@@ -113,10 +127,19 @@
         .where(predicate);
       conditions.push(SQL.sql`${SQL.column("id")} IN (${pointsWithId})`);
     }
-    return SQL.Query.from(lines.table)
+    let query = SQL.Query.from(lines.table)
       .select(select)
-      .where(SQL.and(...conditions))
-      .limit(LINES_VIEWPORT_CAP);
+      .where(SQL.and(...conditions));
+    if (lines.pairType != null) {
+      // Deterministic retention at the cap (see LINES_KEEP_PRIORITY). Also
+      // pins the result order, so overlapping twin geometries no longer swap
+      // draw order (and thus visible color) between requeries.
+      let branches = Object.entries(LINES_KEEP_PRIORITY)
+        .map(([k, p]) => `WHEN '${k.replace(/'/g, "''")}' THEN ${p}`)
+        .join(" ");
+      query = query.orderby(SQL.sql`CASE ${SQL.column(lines.pairType)} ${SQL.verbatim(branches)} ELSE 4 END`);
+    }
+    return query.limit(LINES_VIEWPORT_CAP);
   }
 
   function extractLineRows(data: any): LineRow[] {

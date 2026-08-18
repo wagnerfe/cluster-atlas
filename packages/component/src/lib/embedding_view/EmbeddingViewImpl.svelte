@@ -1048,21 +1048,39 @@
     removed: "#d62728", // red
     stable: "#b5b5b5", // gray
   };
+  // SVG paints in document order, so when identical geometries overlap (co-
+  // located twin lines, e.g. a run-comparison's stable + removed pair) the
+  // pair type drawn LAST wins the pixel. Sort ascending by this priority so
+  // the interesting types (removed, added, candidate->baseline) always end up
+  // on top instead of whichever the query happened to return last.
+  const LINE_DRAW_PRIORITY: Record<string, number> = {
+    stable: 0,
+    "baseline->baseline": 1,
+    "candidate->candidate": 2,
+    "candidate->baseline": 3,
+    added: 4,
+    removed: 5,
+  };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   function lineColor(pairType: string | null): string {
     return (pairType != null ? LINE_COLORS[pairType] : null) ?? "#2ca02c";
   }
 
+  function lineDrawPriority(pairType: string | null): number {
+    return (pairType != null ? LINE_DRAW_PRIORITY[pairType] : null) ?? 3;
+  }
+
   // Pair types currently toggled on (from the UI). `null` means "all visible".
   let visibleLineSet = $derived(linesVisibleTypes != null ? new Set(linesVisibleTypes) : null);
   // Rows come from the Mosaic wrapper (which owns the data client); filter by
-  // the visible pair types and attach a color. `pointLocation` projects lat
-  // internally, so the raw lon/lat endpoints go straight in.
+  // the visible pair types, attach a color, and z-sort. `pointLocation`
+  // projects lat internally, so the raw lon/lat endpoints go straight in.
   let renderedMatchLines = $derived(
     (lineRows ?? [])
       .filter((r) => visibleLineSet == null || r.pairType == null || visibleLineSet.has(r.pairType))
-      .map((r) => ({ ...r, color: lineColor(r.pairType) })),
+      .map((r) => ({ ...r, color: lineColor(r.pairType) }))
+      .sort((a, b) => lineDrawPriority(a.pairType) - lineDrawPriority(b.pairType)),
   );
 
   // Push the current viewport bbox to the wrapper so it can (re)query the
