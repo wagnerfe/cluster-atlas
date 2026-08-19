@@ -66,10 +66,15 @@
     { key: "baseline->baseline", label: "Baseline → Baseline", color: "#1f77b4" },
   ];
   // Run-comparison datasets color lines by `line_status` instead (the backend
-  // sets pairType to that column when the lines parquet carries it).
+  // sets pairType to that column when the lines parquet carries it). "Rewired"
+  // is the backend's reclassification of added/removed edges whose pair is
+  // co-clustered in BOTH runs (e.g. history matching re-pinned the candidate
+  // to its previous-release base) — wiring churn, not a match change, so it
+  // starts toggled off to keep red meaning true regressions.
   const DIFF_LINE_TYPES = [
     { key: "added", label: "Added (new run only)", color: "#2ca02c" },
     { key: "removed", label: "Removed (old run only)", color: "#d62728" },
+    { key: "rewired", label: "Rewired (pair intact)", color: "#bcbd22", defaultOff: true },
     { key: "stable", label: "Stable (both runs)", color: "#b5b5b5" },
   ];
 
@@ -133,9 +138,9 @@
   let matchLinesEnabled = $state(true);
   // svelte-ignore state_referenced_locally
   let visibleMatchLineTypes = $state<string[]>(
-    (spec.data.lines?.pairType === "line_status" ? DIFF_LINE_TYPES : MATCH_LINE_TYPES).map(
-      (t) => t.key,
-    ),
+    (spec.data.lines?.pairType === "line_status" ? DIFF_LINE_TYPES : MATCH_LINE_TYPES)
+      .filter((t) => !("defaultOff" in t && t.defaultOff))
+      .map((t) => t.key),
   );
   let effectiveVisibleLineTypes = $derived(matchLinesEnabled ? visibleMatchLineTypes : []);
 

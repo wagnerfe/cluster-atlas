@@ -92,8 +92,9 @@
     added: 1,
     "candidate->baseline": 2,
     "candidate->candidate": 3,
-    "baseline->baseline": 5,
-    stable: 6,
+    rewired: 5,
+    "baseline->baseline": 6,
+    stable: 7,
   };
   type LineRow = { x1: number; y1: number; x2: number; y2: number; pairType: string | null };
 

@@ -415,6 +415,55 @@ def _run_fast_path(
         # Run-comparison datasets carry a `line_status` column (stable/added/
         # removed); color lines by it instead of the single-run pair type.
         lines_cols = {r[0] for r in con.execute('DESCRIBE "lines"').fetchall()}
+
+        # ``line_status`` is a raw pair-set diff between the two runs' edge
+        # lists, so wiring changes (e.g. history matching pinning a candidate
+        # to its previous-release base instead of fanning out to every
+        # duplicate baseline) flag pruned edges as "removed" even though both
+        # records still resolve to the same cluster. Reclassify edges whose
+        # pair is co-clustered in BOTH runs as "rewired" — the viewer gives
+        # them their own toggle (off by default) so true regressions stay red.
+        if {"line_status", "id", "base_id"} <= lines_cols:
+            from .fast_load import quote_ident
+
+            points_ref = quote_ident(fast_connection.table)
+            points_cols = {
+                r[0] for r in con.execute(f"DESCRIBE {points_ref}").fetchall()
+            }
+            n_rewired = 0
+            if {"id", "cluster_id"} <= points_cols:
+                # removed + same new-run cluster: the pair was together in the
+                # old run (the edge existed) and still is — only the edge went.
+                (n,) = con.execute(
+                    f'''
+                    UPDATE "lines" SET line_status = 'rewired'
+                    FROM {points_ref} p1, {points_ref} p2
+                    WHERE "lines".id = p1.id AND "lines".base_id = p2.id
+                      AND "lines".line_status = 'removed'
+                      AND p1.cluster_id IS NOT NULL
+                      AND p1.cluster_id = p2.cluster_id
+                    '''
+                ).fetchone()
+                n_rewired += n
+            if {"id", "cluster_id_old"} <= points_cols:
+                # added + same old-run cluster: mirror case — the pair was
+                # already together, the new run just materialised the edge.
+                (n,) = con.execute(
+                    f'''
+                    UPDATE "lines" SET line_status = 'rewired'
+                    FROM {points_ref} p1, {points_ref} p2
+                    WHERE "lines".id = p1.id AND "lines".base_id = p2.id
+                      AND "lines".line_status = 'added'
+                      AND p1.cluster_id_old IS NOT NULL
+                      AND p1.cluster_id_old = p2.cluster_id_old
+                    '''
+                ).fetchone()
+                n_rewired += n
+            if n_rewired > 0:
+                print(
+                    f"  Match Lines: {n_rewired} added/removed edges reclassified as"
+                    " 'rewired' (pair co-clustered in both runs; toggle off by default)"
+                )
         lines_files = ["lines.parquet"]
         lines_data_props = {
             "table": "lines",

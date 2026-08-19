@@ -1039,13 +1039,16 @@
   // reads the same green as a matched_candidate point, baseline->baseline the
   // same blue as matched_baseline, and candidate->candidate a lighter green.
   // Run-comparison datasets color by `line_status` instead: added (green) /
-  // removed (red) mirror the delta_class gain/loss hues; stable is gray.
+  // removed (red) mirror the delta_class gain/loss hues; stable is gray;
+  // rewired (edge churned but pair co-clustered in both runs) is olive,
+  // matching the candidate_rematched point hue.
   const LINE_COLORS: Record<string, string> = {
     "candidate->baseline": "#2ca02c", // green
     "candidate->candidate": "#98df8a", // light green
     "baseline->baseline": "#1f77b4", // blue
     added: "#2ca02c", // green
     removed: "#d62728", // red
+    rewired: "#bcbd22", // olive
     stable: "#b5b5b5", // gray
   };
   // SVG paints in document order, so when identical geometries overlap (co-
@@ -1058,8 +1061,9 @@
     "baseline->baseline": 1,
     "candidate->candidate": 2,
     "candidate->baseline": 3,
-    added: 4,
-    removed: 5,
+    rewired: 4,
+    added: 5,
+    removed: 6,
   };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
