@@ -599,8 +599,21 @@ def make_server(
                 if debug_sql:
                     print(f"[prewarm] failed: {exc}", flush=True)
 
-    # Static files for the frontend
-    app.mount("/", StaticFiles(directory=static_path, html=True))
+    # Static files for the frontend. index.html must never be cached: it names
+    # the hashed JS/CSS bundles, and browsers apply heuristic caching when no
+    # Cache-Control is sent — after a rebuild+restart a cached index.html keeps
+    # loading the previous bundle. The hashed assets themselves are immutable.
+    class _NoCacheIndexStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            response = await super().get_response(path, scope)
+            content_type = response.headers.get("content-type", "")
+            if content_type.startswith("text/html"):
+                response.headers["cache-control"] = "no-cache"
+            elif path.startswith("assets/"):
+                response.headers["cache-control"] = "public, max-age=31536000, immutable"
+            return response
+
+    app.mount("/", _NoCacheIndexStaticFiles(directory=static_path, html=True))
 
     return app
 

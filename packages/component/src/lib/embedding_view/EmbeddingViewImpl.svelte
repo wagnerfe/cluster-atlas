@@ -1039,14 +1039,31 @@
   // reads the same green as a matched_candidate point, baseline->baseline the
   // same blue as matched_baseline, and candidate->candidate a lighter green.
   // Run-comparison datasets color by `line_status` instead: added (green) /
-  // removed (red) mirror the delta_class gain/loss hues; stable is gray.
+  // removed (red) mirror the delta_class gain/loss hues; stable is gray;
+  // rewired (edge churned but pair co-clustered in both runs) is olive,
+  // matching the candidate_rematched point hue.
   const LINE_COLORS: Record<string, string> = {
     "candidate->baseline": "#2ca02c", // green
     "candidate->candidate": "#98df8a", // light green
     "baseline->baseline": "#1f77b4", // blue
     added: "#2ca02c", // green
     removed: "#d62728", // red
+    rewired: "#bcbd22", // olive
     stable: "#b5b5b5", // gray
+  };
+  // SVG paints in document order, so when identical geometries overlap (co-
+  // located twin lines, e.g. a run-comparison's stable + removed pair) the
+  // pair type drawn LAST wins the pixel. Sort ascending by this priority so
+  // the interesting types (removed, added, candidate->baseline) always end up
+  // on top instead of whichever the query happened to return last.
+  const LINE_DRAW_PRIORITY: Record<string, number> = {
+    stable: 0,
+    "baseline->baseline": 1,
+    "candidate->candidate": 2,
+    "candidate->baseline": 3,
+    rewired: 4,
+    added: 5,
+    removed: 6,
   };
   let linesRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1054,15 +1071,20 @@
     return (pairType != null ? LINE_COLORS[pairType] : null) ?? "#2ca02c";
   }
 
+  function lineDrawPriority(pairType: string | null): number {
+    return (pairType != null ? LINE_DRAW_PRIORITY[pairType] : null) ?? 3;
+  }
+
   // Pair types currently toggled on (from the UI). `null` means "all visible".
   let visibleLineSet = $derived(linesVisibleTypes != null ? new Set(linesVisibleTypes) : null);
   // Rows come from the Mosaic wrapper (which owns the data client); filter by
-  // the visible pair types and attach a color. `pointLocation` projects lat
-  // internally, so the raw lon/lat endpoints go straight in.
+  // the visible pair types, attach a color, and z-sort. `pointLocation`
+  // projects lat internally, so the raw lon/lat endpoints go straight in.
   let renderedMatchLines = $derived(
     (lineRows ?? [])
       .filter((r) => visibleLineSet == null || r.pairType == null || visibleLineSet.has(r.pairType))
-      .map((r) => ({ ...r, color: lineColor(r.pairType) })),
+      .map((r) => ({ ...r, color: lineColor(r.pairType) }))
+      .sort((a, b) => lineDrawPriority(a.pairType) - lineDrawPriority(b.pairType)),
   );
 
   // Push the current viewport bbox to the wrapper so it can (re)query the
