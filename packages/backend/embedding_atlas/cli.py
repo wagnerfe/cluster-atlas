@@ -982,6 +982,11 @@ def main(
         duckdb_uri=duckdb,
     )
     if fast_connection is not None:
+        # Expose a ``name`` column (if present) as the viewer's tooltip/label
+        # text, same as the match-eval launcher does. This powers the "Point
+        # Labels" toggle; it is pure metadata and does not trigger any
+        # embedding (the fast path is ruled out when ``--text`` is passed).
+        cols_lower = {c.lower(): c for c in fast_connection.columns}
         return _run_fast_path(
             fast_connection=fast_connection,
             static=static,
@@ -991,6 +996,7 @@ def main(
             enable_mcp=enable_mcp,
             cors=cors,
             duckdb_uri=duckdb,
+            text_column=cols_lower.get("name"),
         )
 
     df = load_datasets(inputs, splits=split, query=query, sample=sample)
