@@ -8,7 +8,8 @@
     "build": "uv run python scripts/download_duckdb_extensions.py && vite build && vite build --config vite.config.lib.js",
     "check": "svelte-check",
     "package": "npm run build && publint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "files": [
     "distlib"
@@ -37,6 +38,7 @@
     "@codemirror/state": "^6.6.0",
     "@codemirror/theme-one-dark": "^6.1.3",
     "@codemirror/view": "^6.40.0",
+    "@duckdb/node-api": "^2.0.1-r.1",
     "@embedding-atlas/component": "*",
     "@embedding-atlas/umap-wasm": "*",
     "@embedding-atlas/utils": "*",
@@ -73,6 +75,7 @@
     "unplugin-icons": "^23.0.1",
     "vite": "^8.0.1",
     "vite-plugin-dts": "^4.5.4",
-    "vite-plugin-wasm": "^3.6.0"
+    "vite-plugin-wasm": "^3.6.0",
+    "vitest": "^4.1.0"
   }
 }
