@@ -141,92 +141,23 @@ export async function basketCount(db: BasketDB): Promise<number> {
   return Number(rows[0]?.n ?? 0);
 }
 
-// ---- CSV flattening ------------------------------------------------------
+// ---- CSV export ----------------------------------------------------------
 
-type ParsedType =
-  | { kind: "scalar" }
-  | { kind: "other" }
-  | { kind: "list"; element: ParsedType }
-  | { kind: "struct"; fields: { name: string; type: ParsedType }[] };
-
-// Split on commas that are not nested in parentheses, brackets or quotes.
-function splitTopLevel(s: string): string[] {
-  let parts: string[] = [];
-  let depth = 0;
-  let quoteChar: string | null = null;
-  let start = 0;
-  for (let i = 0; i < s.length; i++) {
-    let ch = s[i];
-    if (quoteChar != null) {
-      if (ch == quoteChar) quoteChar = null;
-    } else if (ch == '"' || ch == "'") {
-      quoteChar = ch;
-    } else {
-      if (ch == "(" || ch == "[") depth++;
-      else if (ch == ")" || ch == "]") depth--;
-      else if (ch == "," && depth == 0) {
-        parts.push(s.slice(start, i));
-        start = i + 1;
-      }
-    }
-  }
-  parts.push(s.slice(start));
-  return parts.map((p) => p.trim()).filter((p) => p != "");
-}
-
-// Parse a DuckDB type string as printed by DESCRIBE, e.g.
-// ``STRUCT("primary" VARCHAR, rules STRUCT(variant VARCHAR)[])[]``.
-export function parseDuckDBType(type: string): ParsedType {
+// Nested DuckDB types as printed by DESCRIBE: STRUCT(...), MAP(...), UNION(...)
+// and lists/arrays (``T[]``, ``T[3]``).
+function isNested(type: string): boolean {
   let t = type.trim();
-  let list = t.match(/^(.*)\[\d*\]$/s);
-  if (list) {
-    return { kind: "list", element: parseDuckDBType(list[1]) };
-  }
-  let struct = t.match(/^STRUCT\s*\((.*)\)$/is);
-  if (struct) {
-    let fields = splitTopLevel(struct[1]).map((f) => {
-      let m = f.match(/^"((?:[^"]|"")*)"\s+(.*)$/s) ?? f.match(/^(\S+)\s+(.*)$/s);
-      if (!m) {
-        throw new Error(`Cannot parse struct field: ${f}`);
-      }
-      return { name: m[1].replace(/""/g, '"'), type: parseDuckDBType(m[2]) };
-    });
-    return { kind: "struct", fields };
-  }
-  if (/^(MAP|UNION)\s*\(/i.test(t)) {
-    return { kind: "other" };
-  }
-  return { kind: "scalar" };
-}
-
-function flatten(expr: string, label: string, type: ParsedType, out: string[]) {
-  switch (type.kind) {
-    case "scalar":
-      out.push(`${expr} AS ${quote(label)}`);
-      break;
-    case "other":
-      out.push(`CAST(${expr} AS VARCHAR) AS ${quote(label)}`);
-      break;
-    case "list":
-      flatten(`${expr}[1]`, `${label}[0]`, type.element, out);
-      break;
-    case "struct":
-      for (let f of type.fields) {
-        flatten(`struct_extract(${expr}, ${literal(f.name)})`, `${label}.${f.name}`, f.type, out);
-      }
-      break;
-  }
+  return /^(STRUCT|MAP|UNION)\s*\(/i.test(t) || /\[\d*\]$/.test(t);
 }
 
 /**
- * A flat projection of ``table`` for CSV: scalars as-is, struct fields as
- * ``col.field``, lists by their first element (``col[0]``), recursively; maps
- * and unions as text.
+ * A CSV-safe projection of ``table``: one column per basket column, with
+ * nested values (structs, lists, maps, unions) serialized as JSON text, e.g.
+ * ``names`` = ``{"primary":"Rusheen Bay"}``.
  */
 export function csvSelectSql(table: string, columns: ColumnInfo[]): string {
-  let out: string[] = [];
-  for (let c of columns) {
-    flatten(quote(c.name), c.name, parseDuckDBType(c.type), out);
-  }
+  let out = columns.map((c) =>
+    isNested(c.type) ? `CAST(to_json(${quote(c.name)}) AS VARCHAR) AS ${quote(c.name)}` : quote(c.name),
+  );
   return `SELECT ${out.join(", ")} FROM ${table}`;
 }

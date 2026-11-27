@@ -133,7 +133,7 @@ group("csvSelectSql", () => {
     expect(await describe(db, csvSelectSql(BASKET_TABLE, columns))).toEqual(columns);
   });
 
-  test("flattens nested columns of an enriched schema", async () => {
+  test("keeps nested columns of an enriched schema as one JSON text column each", async () => {
     await conn.run(`CREATE TABLE enriched AS SELECT
       {'primary': 'Cafe', 'common': MAP {'en': 'Cafe'}} AS names,
       [{'freeform': '1 Main St', 'locality': 'Galway'}] AS addresses,
@@ -143,12 +143,10 @@ group("csvSelectSql", () => {
     let sql = csvSelectSql("enriched", await describe(db, "enriched"));
     expect(await rows(sql)).toEqual([
       {
-        "names.primary": "Cafe",
-        "names.common": "{en=Cafe}",
-        "addresses[0].freeform": "1 Main St",
-        "addresses[0].locality": "Galway",
-        "websites[0]": "https://a.example",
-        "emails[0]": null,
+        names: '{"primary":"Cafe","common":{"en":"Cafe"}}',
+        addresses: '[{"freeform":"1 Main St","locality":"Galway"}]',
+        websites: '["https://a.example","https://b.example"]',
+        emails: "[]",
         composite_score: 0.5,
       },
     ]);

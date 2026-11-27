@@ -162,8 +162,8 @@
 
   // Export the basket via the server's /data/selection COPY endpoint (same
   // origin as the page; the API is mounted under /data). Parquet exports the
-  // basket table as-is; CSV exports a flattened projection derived from the
-  // basket's schema (see csvSelectSql).
+  // basket table as-is; CSV exports the same columns with nested values as
+  // JSON text (see csvSelectSql).
   function downloadBasket(format: "parquet" | "csv") {
     if (basketCount == 0) {
       return;

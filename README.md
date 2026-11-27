@@ -88,8 +88,8 @@ within the session.
 
 When done, **Parquet** exports the whole basket as `cluster-basket.parquet` (via
 the same COPY-to-parquet endpoint the selection export uses), **CSV** exports
-`cluster-basket.csv` with nested columns flattened (struct fields become
-`col.field`, lists keep their first element as `col[0]`, maps become text), and
+`cluster-basket.csv` with the same columns, nested values (structs, lists, maps)
+written as JSON text in a single column (e.g. `names` = `{"primary":"Rusheen Bay"}`), and
 **Clear** empties it. If you load a dataset whose `lines` or points columns differ from an
 existing basket, **Add cluster** shows an error asking you to **Clear** first;
 basket errors are shown inline next to the count. The result is a compact file of
