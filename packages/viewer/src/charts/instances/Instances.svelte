@@ -17,6 +17,14 @@
   import { downloadBuffer } from "../../utils/download.js";
   import { isolatedWritable } from "../../utils/store.js";
   import type { ChartViewProps, RowID } from "../chart.js";
+  import {
+    addToBasket,
+    BASKET_TABLE,
+    basketCount as basketCountQuery,
+    csvSelectSql,
+    describe,
+    type BasketDB,
+  } from "./basket.js";
   import { instancesQuery } from "./query.js";
   import type { InstancesSpec, InstancesState, SortOrder } from "./types.js";
 
@@ -51,15 +59,41 @@
 
   // ---- Cluster basket (matcher-eval) -------------------------------------
   // Accumulate the match lines of the clusters the user picks (via the map's
-  // click-to-filter) into a server-side table, then download it as parquet. Each
-  // row carries the ``lines`` columns (minus the rendering-only endpoint coords /
-  // match_pair_type) plus ``cluster_id`` and the empty ``label`` / ``label_quality``
-  // annotation columns. Only shown when a ``cluster_id`` column is present (the
-  // prebuilt matcher-eval format), which also guarantees the ``lines`` table exists.
-  const BASKET_TABLE = "__cluster_basket";
+  // click-to-filter) into a server-side table, then download it. Each row is
+  // ``cluster_id``, the empty ``label`` / ``label_quality`` annotation columns,
+  // every column of the ``lines`` table, then the points columns of both sides
+  // of the pair (the ``base_id`` side as ``base_<column>``; see basket.ts).
+  // Only shown when a ``cluster_id`` column is present (the prebuilt
+  // matcher-eval format), which also guarantees the ``lines`` table exists.
   let basketEnabled = $derived(context.columns.some((c) => c.name === "cluster_id"));
   let basketCount = $state.raw(0);
   let basketBusy = $state(false);
+  let basketError = $state<string | null>(null);
+
+  const basketDB: BasketDB = {
+    exec: (sql) => context.coordinator.exec(sql),
+    query: async (sql) => {
+      let result: any = await context.coordinator.query(sql, { cache: false });
+      return result.toArray().map((row: any) => ({ ...row }));
+    },
+  };
+
+  // Run a basket action, surfacing any failure in the basket bar.
+  async function runBasketAction(action: () => Promise<void>) {
+    if (basketBusy) {
+      return;
+    }
+    basketBusy = true;
+    try {
+      await action();
+      basketError = null;
+    } catch (e: any) {
+      console.error("[cluster-basket]", e);
+      basketError = e?.message ?? String(e);
+    } finally {
+      basketBusy = false;
+    }
+  }
 
   // Extract just the ``cluster_id`` clause(s) from the shared cross-filter,
   // dropping any spatial marquee/lasso brush. The map wires
@@ -71,9 +105,7 @@
   // also survives the highlight-clearing re-query that a click triggers.
   function clusterPredicate(): any {
     let clauses = (context.filter as any).clauses ?? [];
-    let preds = clauses
-      .map((c: any) => c?.predicate)
-      .filter((p: any) => p != null && String(p).includes("cluster_id"));
+    let preds = clauses.map((c: any) => c?.predicate).filter((p: any) => p != null && String(p).includes("cluster_id"));
     return preds.length > 0 ? preds : null;
   }
 
@@ -90,10 +122,9 @@
 
   async function refreshBasketCount() {
     try {
-      let r = await context.coordinator.query(SQL.Query.from(BASKET_TABLE).select({ n: SQL.count() }));
-      basketCount = Number(r.get(0).n);
-    } catch {
-      // Table not created yet (no clusters added).
+      basketCount = await basketCountQuery(basketDB);
+    } catch (e) {
+      console.error("[cluster-basket]", e);
       basketCount = 0;
     }
   }
@@ -106,125 +137,46 @@
     }
   });
 
-  // Add the currently-selected cluster's match lines to the basket. Each row is
-  // one ``lines`` row scoped to the cluster by joining to the points that pass
-  // the active filter, enriched with the point's ``cluster_id``; deduped on
-  // (id, base_id). The rendering-only geometry columns (lon/lat endpoints,
-  // match_pair_type) are dropped, and two annotation columns are added for the
-  // downstream labelling pass: ``label`` (empty, to be filled with 1/0) and
-  // ``label_quality`` (defaults to 1).
-  const BASKET_DROP_COLUMNS = ["lon1", "lon2", "lat1", "lat2", "match_pair_type"];
-  // Columns pulled to the front of the exported parquet, in this order (they are
-  // still kept — just reordered); the remaining ``lines`` columns follow in their
-  // natural order. Names must exist in the enriched lines schema.
-  const BASKET_FRONT_COLUMNS = [
-    "composite_score",
-    "names",
-    "base_names",
-    "addresses",
-    "base_addresses",
-    "taxonomy",
-    "base_taxonomy",
-    "websites",
-    "base_websites",
-    "socials",
-    "base_socials",
-    "emails",
-    "base_emails",
-  ];
-  async function addClusterToBasket() {
+  // Add the currently-selected cluster's match lines to the basket: the
+  // ``lines`` rows whose (id, provider) is a point in the cluster, deduped on
+  // the pair keys (see basket.ts).
+  function addClusterToBasket() {
     let pred = clusterPredicate();
-    if (!basketEnabled || basketBusy || pred == null) {
+    if (!basketEnabled || pred == null) {
       return;
     }
-    basketBusy = true;
-    try {
-      // The clause is ``cluster_id IN (…)`` for the clicked cluster(s), so the
-      // matching points already form whole clusters (no brush involved).
-      let pointsSub = String(SQL.Query.from(context.table).select("id", "cluster_id").where(pred));
-      // Front columns are listed explicitly first, then EXCLUDE'd from ``l.*`` so
-      // they are not duplicated; the drop columns are EXCLUDE'd outright.
-      let front = BASKET_FRONT_COLUMNS.map((c) => `l."${c}"`).join(", ");
-      let exclude = `EXCLUDE (${[...BASKET_FRONT_COLUMNS, ...BASKET_DROP_COLUMNS].join(", ")})`;
-      let extra = `p."cluster_id" AS cluster_id,
-        CAST(NULL AS INTEGER) AS label,
-        CAST(1 AS INTEGER) AS label_quality`;
-      let shape = `SELECT ${front}, l.* ${exclude}, ${extra}
-        FROM "lines" l JOIN "${context.table}" p ON l."id" = p."id" WHERE FALSE`;
-      let insert = `INSERT INTO ${BASKET_TABLE}
-        SELECT DISTINCT ${front}, l.* ${exclude}, ${extra}
-        FROM "lines" l
-        JOIN (${pointsSub}) p ON l."id" = p."id"
-        WHERE NOT EXISTS (
-          SELECT 1 FROM ${BASKET_TABLE} b WHERE b."id" = l."id" AND b."base_id" = l."base_id"
-        );`;
-      try {
-        await context.coordinator.exec(`
-          CREATE TABLE IF NOT EXISTS ${BASKET_TABLE} AS ${shape};
-          ${insert}
-        `);
-      } catch {
-        // A basket table left by an earlier build may have a different schema, so
-        // CREATE ... IF NOT EXISTS is a no-op and the INSERT fails on the column
-        // mismatch. Rebuild it fresh (drops any accumulated rows) and retry once.
-        await context.coordinator.exec(`
-          DROP TABLE IF EXISTS ${BASKET_TABLE};
-          CREATE TABLE ${BASKET_TABLE} AS ${shape};
-          ${insert}
-        `);
-      }
-      await refreshBasketCount();
-    } finally {
-      basketBusy = false;
-    }
+    // The clause is ``cluster_id IN (…)`` for the clicked cluster(s), so the
+    // matching points already form whole clusters (no brush involved).
+    let pointsQuery = String(SQL.Query.from(context.table).select("id", "provider", "cluster_id").where(pred));
+    return runBasketAction(async () => {
+      basketCount = await addToBasket(basketDB, pointsQuery, context.table);
+    });
   }
 
-  async function clearBasket() {
-    if (basketBusy) {
-      return;
-    }
-    basketBusy = true;
-    try {
+  function clearBasket() {
+    return runBasketAction(async () => {
       await context.coordinator.exec(`DROP TABLE IF EXISTS ${BASKET_TABLE}`);
       basketCount = 0;
-    } finally {
-      basketBusy = false;
-    }
+    });
   }
-
-  // Flattened projection for the CSV export: the annotation/id columns plus the
-  // first value of each nested field (structs by field name, lists by [1]).
-  const BASKET_CSV_SELECT = `
-    SELECT
-      label, id, base_id, composite_score,
-      names."primary"            AS "names.primary",
-      base_names."primary"       AS "base_names.primary",
-      addresses[1].freeform      AS "addresses.freeform",
-      base_addresses[1].freeform AS "base_addresses.freeform",
-      taxonomy."primary"         AS "taxonomy.primary",
-      base_taxonomy."primary"    AS "base_taxonomy.primary",
-      websites[1]                AS "websites[0]",
-      base_websites[1]           AS "base_websites[0]",
-      socials[1]                 AS "socials[0]",
-      base_socials[1]            AS "base_socials[0]",
-      emails[1]                  AS "emails[0]",
-      base_emails[1]             AS "base_emails[0]"
-    FROM ${BASKET_TABLE}`;
 
   // Export the basket via the server's /data/selection COPY endpoint (same
   // origin as the page; the API is mounted under /data). Parquet exports the
-  // full basket table as-is; CSV exports the flattened projection above.
-  async function downloadBasket(format: "parquet" | "csv") {
-    if (basketBusy || basketCount == 0) {
+  // basket table as-is; CSV exports the same columns with nested values as
+  // JSON text (see csvSelectSql).
+  function downloadBasket(format: "parquet" | "csv") {
+    if (basketCount == 0) {
       return;
     }
-    basketBusy = true;
-    try {
+    return runBasketAction(async () => {
       let table = BASKET_TABLE;
       let tempTable: string | null = null;
       if (format === "csv") {
         tempTable = `${BASKET_TABLE}_csv`;
-        await context.coordinator.exec(`CREATE OR REPLACE TABLE ${tempTable} AS ${BASKET_CSV_SELECT}`);
+        let columns = await describe(basketDB, BASKET_TABLE);
+        await context.coordinator.exec(
+          `CREATE OR REPLACE TABLE ${tempTable} AS ${csvSelectSql(BASKET_TABLE, columns)}`,
+        );
         table = tempTable;
       }
       try {
@@ -234,7 +186,7 @@
           body: JSON.stringify({ table, format }),
         });
         if (!resp.ok) {
-          throw new Error(`basket export failed: ${resp.status}`);
+          throw new Error(`Basket export failed: ${resp.status} ${await resp.text()}`);
         }
         downloadBuffer(await resp.arrayBuffer(), `cluster-basket.${format}`);
       } finally {
@@ -242,9 +194,7 @@
           await context.coordinator.exec(`DROP TABLE IF EXISTS ${tempTable}`);
         }
       }
-    } finally {
-      basketBusy = false;
-    }
+    });
   }
 
   // Subscribe to highlight changes
@@ -548,14 +498,15 @@
     </div>
     {#if basketEnabled}
       <div class="flex items-center gap-2 flex-shrink-0">
+        {#if basketError}
+          <span class="text-xs text-red-600 dark:text-red-400 max-w-80 truncate" title={basketError} role="alert">
+            {basketError}
+          </span>
+        {/if}
         <span class="text-xs text-slate-500 dark:text-slate-400 select-none whitespace-nowrap">
           Basket: {basketCount.toLocaleString()} pairs
         </span>
-        <Button
-          label="Add cluster"
-          disabled={basketBusy || !clusterSelectionActive}
-          onClick={addClusterToBasket}
-        />
+        <Button label="Add cluster" disabled={basketBusy || !clusterSelectionActive} onClick={addClusterToBasket} />
         <Button label="Parquet" disabled={basketBusy || basketCount == 0} onClick={() => downloadBasket("parquet")} />
         <Button label="CSV" disabled={basketBusy || basketCount == 0} onClick={() => downloadBasket("csv")} />
         <Button label="Clear" disabled={basketBusy || basketCount == 0} onClick={clearBasket} />

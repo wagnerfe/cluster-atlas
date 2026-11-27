@@ -17,6 +17,7 @@
   import EmbeddingViewImpl from "./EmbeddingViewImpl.svelte";
 
   import { deepEquals, type Point, type Rectangle, type ViewportState } from "../utils.js";
+  import { Viewport } from "../viewport_utils.js";
   import type { EmbeddingViewMosaicProps } from "./embedding_view_mosaic_api.js";
   import { IMAGE_LABEL_SIZE } from "./labels.js";
   import {
@@ -300,7 +301,22 @@
         return;
       }
       let scaler = approxDensity.scaler * 0.95; // shrink a bit so the point is not exactly on the edge.
-      defaultViewportState = { x: approxDensity.centerX, y: approxDensity.centerY, scale: scaler };
+      let centerY = approxDensity.centerY;
+      // In GIS mode the viewport y is Web Mercator, but the data and the
+      // hint are in latitude: project the center (and the hint's y extent),
+      // or the map opens far south of the data (e.g. Galway → Bay of Biscay).
+      if (config?.isGis === true || viewportHint != null) {
+        const project = (lat: number) => Viewport.projectLat(Math.max(-85.05, Math.min(85.05, lat)));
+        if (viewportHint != null) {
+          const yMin = project(viewportHint.centerY - viewportHint.rangeY / 2);
+          const yMax = project(viewportHint.centerY + viewportHint.rangeY / 2);
+          centerY = (yMin + yMax) / 2;
+          scaler = 0.95 / (Math.max(viewportHint.rangeX, yMax - yMin, 1e-9) * 0.5);
+        } else {
+          centerY = project(centerY);
+        }
+      }
+      defaultViewportState = { x: approxDensity.centerX, y: centerY, scale: scaler };
       totalCount = approxDensity.totalCount;
       maxDensity = approxDensity.maxDensity;
       categoryCount = approxDensity.categoryCount;
