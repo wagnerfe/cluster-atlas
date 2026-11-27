@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Apple Inc. Licensed under MIT License.
+// Copyright (c) 2025 Geospatial Atlas contributors. MIT License.
 
 // Cluster basket (matcher-eval): the SQL behind "Add cluster" and the basket
 // exports. Kept free of Svelte/Mosaic so it can be tested against plain DuckDB.

@@ -61,9 +61,10 @@
   // Accumulate the match lines of the clusters the user picks (via the map's
   // click-to-filter) into a server-side table, then download it. Each row is
   // ``cluster_id``, the empty ``label`` / ``label_quality`` annotation columns,
-  // then every column of the ``lines`` table (see basket.ts). Only shown when a
-  // ``cluster_id`` column is present (the prebuilt matcher-eval format), which
-  // also guarantees the ``lines`` table exists.
+  // every column of the ``lines`` table, then the points columns of both sides
+  // of the pair (the ``base_id`` side as ``base_<column>``; see basket.ts).
+  // Only shown when a ``cluster_id`` column is present (the prebuilt
+  // matcher-eval format), which also guarantees the ``lines`` table exists.
   let basketEnabled = $derived(context.columns.some((c) => c.name === "cluster_id"));
   let basketCount = $state.raw(0);
   let basketBusy = $state(false);
@@ -73,7 +74,7 @@
     exec: (sql) => context.coordinator.exec(sql),
     query: async (sql) => {
       let result: any = await context.coordinator.query(sql, { cache: false });
-      return result.toArray().map((row: any) => (typeof row?.toJSON === "function" ? row.toJSON() : { ...row }));
+      return result.toArray().map((row: any) => ({ ...row }));
     },
   };
 
