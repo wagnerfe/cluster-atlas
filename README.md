@@ -76,8 +76,12 @@ a server-side `__cluster_basket` DuckDB table. Each row is a line of the Lines
 dataset whose `(id, provider)` belongs to a point in the active filter, joined on
 `(id, provider)` and deduped on `(id, provider, base_id, base_provider)`. The
 basket has the annotation columns `cluster_id`, `label` (empty) and `label_quality`
-(`1`) first, then **every column of `lines` as loaded** — nothing is hard-coded,
-so it works with both the slim production schema and enriched ones. Repeat across
+(`1`) first, then **every column of `lines` as loaded**, then **every point column
+for both sides of the pair** — the `id` side as-is and the `base_id` side prefixed
+`base_` (`name`, `base_name`, `address`, `base_address`, …). Nothing is
+hard-coded, so it works with both the slim production schema and enriched ones;
+point columns whose name is already taken (`id`, `provider`, `base_id`, …) and the
+viewer's internal `__*` columns are skipped. Repeat across
 as many clusters as you like — the basket is a real table on the shared
 connection, so the running count is plain SQL and it survives a page reload
 within the session.
@@ -86,7 +90,7 @@ When done, **Parquet** exports the whole basket as `cluster-basket.parquet` (via
 the same COPY-to-parquet endpoint the selection export uses), **CSV** exports
 `cluster-basket.csv` with nested columns flattened (struct fields become
 `col.field`, lists keep their first element as `col[0]`, maps become text), and
-**Clear** empties it. If you load a dataset whose `lines` columns differ from an
+**Clear** empties it. If you load a dataset whose `lines` or points columns differ from an
 existing basket, **Add cluster** shows an error asking you to **Clear** first;
 basket errors are shown inline next to the count. The result is a compact file of
 hand-picked match clusters — ideal as regression fixtures, hard-case examples, or

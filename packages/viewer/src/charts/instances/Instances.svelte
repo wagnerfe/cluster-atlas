@@ -148,7 +148,7 @@
     // matching points already form whole clusters (no brush involved).
     let pointsQuery = String(SQL.Query.from(context.table).select("id", "provider", "cluster_id").where(pred));
     return runBasketAction(async () => {
-      basketCount = await addToBasket(basketDB, pointsQuery);
+      basketCount = await addToBasket(basketDB, pointsQuery, context.table);
     });
   }
 
